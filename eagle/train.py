@@ -41,6 +41,8 @@ def _train() -> None:
 
     print("Initializing lm head")
     lm_head = _initialize_verifier_lm_head(verifier_path=model_path, device=device)
+    # lm_head = lm_head.to(torch.float32)
+    # print(next(lm_head.parameters()).dtype)
 
     print("Initializing datasets")
     train_dataset = Dataset(dataset_path=train_dataset_path, max_model_len=max_model_len)
@@ -50,7 +52,9 @@ def _train() -> None:
     
     print("Initializing eagle model")
     config = transformers.AutoConfig.from_pretrained(eagle_config_path)
-    model = Model(config, load_emb=True, path=model_path).to(device)
+    model = Model(config, load_emb=True, path=model_path)#.to(config.torch_dtype)
+    # for k, v in model.named_parameters():
+        # print(k, v.dtype)
 
     print("Initializing loss, optimizers, etc")
     criterion = torch.nn.SmoothL1Loss(reduction="none")
@@ -69,22 +73,21 @@ def _train() -> None:
         for batch in train_data_loader:
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
-                predict = model(batch["hidden_states"].to(device), input_ids=batch["input_ids"].to(device), attention_mask=batch["attention_mask"].to(device))
-                predict = predict.to(device)
+                predict = model(batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
 
                 with torch.no_grad():
-                    target_head = lm_head(batch["target"].to(device))
+                    target_head = lm_head(batch["target"])
                     target_p = torch.nn.Softmax(dim=2)(target_head)
                     target_p = target_p.detach()
                 
                 out_head = lm_head(predict)
                 out_logp = torch.nn.LogSoftmax(dim=2)(out_head)
 
-                loss_mask = batch["loss_mask"].to(device)[:, :, None]
+                loss_mask = batch["loss_mask"][:, :, None]
                 plogp = target_p * out_logp
                 ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
 
-                vloss = criterion(predict, batch["target"].to(device))
+                vloss = criterion(predict, batch["target"])
                 vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
 
                 loss = v_w * vloss + p_w * ploss

@@ -6,24 +6,25 @@ Command bellow tokenizes dataset and create all needed masks that will be retrie
 rm -rf ./tokenized_dataset
 python ./eagle/prepare_dataset.py \
     --input ./resources/raw_example_dataset.jsonl \
-    --model /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat \
-    --tokenizer /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat \
-    --device mps \
+    --model /mnt/eagle/models/meta-llama2-7b-chat-hf \
+    --tokenizer /mnt/eagle/models/meta-llama2-7b-chat-hf \
+    --device cuda \
     --output ./tokenized_dataset
 ```
 
-In docker
+Or use docker
 
 ```bash
 docker run \
+    --gpus all \
     -v $(pwd)/resources:/mnt/resources \
-    -v /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat:/mnt/model \
+    -v /mnt/eagle/models/meta-llama2-7b-chat-hf:/mnt/model \
     -v $(pwd)/tokenized_dataset:/mnt/tokenized_dataset \
     eagle \
     python ./eagle/prepare_dataset.py \
     --input /mnt/resources/raw_example_dataset.jsonl \
     --model /mnt/model \
     --tokenizer /mnt/model \
-    --device cpu \
+    --device cuda \
     --output /mnt/tokenized_dataset
 ```

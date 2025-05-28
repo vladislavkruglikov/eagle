@@ -37,7 +37,7 @@ def _prepare_dataset() -> None:
     dataset.set_format(type="torch")
 
     print("Loading model")
-    model = transformers.AutoModelForCausalLM.from_pretrained(model_path,  device_map=device).eval()
+    model = transformers.AutoModelForCausalLM.from_pretrained(model_path,  device_map=device, torch_dtype="auto").eval()
     
     if not output_dir.exists():
         output_dir.mkdir()

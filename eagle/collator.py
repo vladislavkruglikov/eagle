@@ -6,7 +6,7 @@ class Collator:
         intensors = intensors.unsqueeze(0)
         B, n, S = intensors.shape
         padding_tensor = torch.zeros(B, N - n, S)
-        outtensors = torch.cat((intensors.to("mps"), padding_tensor.to("mps")), dim=1)
+        outtensors = torch.cat((intensors, padding_tensor.to(intensors.device)), dim=1)
         return outtensors
 
     def paddingtensor2D(self, intensors, N):
