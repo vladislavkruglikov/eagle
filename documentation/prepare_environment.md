@@ -18,4 +18,5 @@ Or create local environment and install current package
 python3 -m venv venv
 source venv/bin/activate
 pip install -e .
+export PYTHONPATH=$PYTHONPATH:.
 ```

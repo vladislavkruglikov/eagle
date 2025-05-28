@@ -7,9 +7,9 @@ import accelerate
 import safetensors
 import transformers
 
+from eagle.model import Model
 from eagle.dataset import Dataset
 from eagle.collator import Collator
-from eagle.model import Model
 
 
 def _train() -> None:
@@ -31,7 +31,7 @@ def _train() -> None:
     print("Initializing accelerate")
     torch.backends.cuda.matmul.allow_tf32 = True
     accelerate.utils.set_seed(0)
-    accelerator = accelerate.Accelerator()
+    accelerator = accelerate.Accelerator(mixed_precision="bf16")
     
     if accelerator.is_main_process:
         print("Initializing wandb")
@@ -40,7 +40,6 @@ def _train() -> None:
 
     print("Initializing lm head")
     lm_head = _initialize_verifier_lm_head(verifier_path=model_path)
-    lm_head = lm_head.to(torch.float32)
     # print(next(lm_head.parameters()).dtype)
 
     print("Initializing datasets")
@@ -51,7 +50,7 @@ def _train() -> None:
     
     print("Initializing eagle model")
     config = transformers.AutoConfig.from_pretrained(eagle_config_path)
-    model = Model(config, load_emb=True, path=model_path)#.to(config.torch_dtype)
+    model = Model(config, load_emb=True, path=model_path).to(config.torch_dtype)
     # for k, v in model.named_parameters():
         # print(k, v.dtype)
 

@@ -5,7 +5,7 @@
   "model_type": "llama",
   "hidden_act": "silu",
   "hidden_size": 4096,
-  "torch_dtype": "float16",
+  "torch_dtype": "bfloat16",
   "intermediate_size": 11008,
   "num_attention_heads": 32,
   "num_hidden_layers": 1,
