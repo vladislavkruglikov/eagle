@@ -8,7 +8,7 @@ setuptools.setup(
     author="Vladislav Kruglikov",
     author_email="vladislavkruglikov@icloud.com",
     url="https://github.com/vladislavkruglikov/eagle",
-    packages=setuptools.find_packages(where="eagle"),
+    packages=setuptools.find_packages(where="."),
     install_requires=[
         "accelerate==1.7.0",
         "datasets==3.6.0",
