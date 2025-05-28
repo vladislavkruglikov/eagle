@@ -23,6 +23,7 @@ docker run \
     -v $(pwd)/resources:/mnt/resources \
     -v $(pwd)/checkpoints:/mnt/checkpoints \
     -v $(pwd)/tokenized_dataset:/mnt/tokenized_dataset \
+    -e WANDB_MODE=offline \
     -v /mnt/eagle/models/meta-llama2-7b-chat-hf:/mnt/model \
     eagle \
     accelerate launch eagle/train.py \
