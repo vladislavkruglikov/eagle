@@ -1,13 +1,12 @@
 ## Train
 
-Train model
+Train model, mps is enabled by default on mac, to disable use --cpu
 
 ```bash
-accelerate launch --cpu eagle/train.py \
+accelerate launch eagle/train.py \
     --train-input ./tokenized_dataset \
     --test-input ./tokenized_dataset \
-    --model /mnt/eagle/models/meta-llama2-7b-chat-hf \
-    --device cuda \
+    --model /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat \
     --max-model-len 2048 \
     --epochs 100 \
     --lr 2e-4 \
@@ -30,7 +29,6 @@ docker run \
     --train-input /mnt/tokenized_dataset \
     --test-input /mnt/tokenized_dataset \
     --model /mnt/model \
-    --device cuda \
     --max-model-len 2048 \
     --epochs 100 \
     --lr 2e-4 \

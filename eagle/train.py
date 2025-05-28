@@ -18,7 +18,6 @@ def _train() -> None:
     train_dataset_path: pathlib.Path = arguments.train_input
     test_dataset_path: pathlib.Path = arguments.test_input
     model_path: pathlib.Path = arguments.model
-    device: str = arguments.device
     max_model_len = arguments.max_model_len
     epochs = arguments.epochs
     v_w = 1.0
@@ -40,8 +39,8 @@ def _train() -> None:
         wandb.init(project="eagle")
 
     print("Initializing lm head")
-    lm_head = _initialize_verifier_lm_head(verifier_path=model_path, device=device)
-    # lm_head = lm_head.to(torch.float32)
+    lm_head = _initialize_verifier_lm_head(verifier_path=model_path)
+    lm_head = lm_head.to(torch.float32)
     # print(next(lm_head.parameters()).dtype)
 
     print("Initializing datasets")
@@ -136,12 +135,6 @@ def _parse_arguments() -> argparse.Namespace:
         help="Path to verifier model"
     )
     parser.add_argument(
-        "--device",
-        type=str,
-        default="cpu",
-        help="Device that will be used by the large model to generate hidden states (e.g., 'cpu', 'cuda:0')"
-    )
-    parser.add_argument(
         "--max-model-len",
         type=int,
         default=2048,
@@ -179,14 +172,14 @@ def _parse_arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _initialize_verifier_lm_head(verifier_path: pathlib.Path, device: str) -> torch.nn.Linear:
+def _initialize_verifier_lm_head(verifier_path: pathlib.Path) -> torch.nn.Linear:
     with open(f"{verifier_path}/config.json", "r") as file:
         config = json.load(file)
     head = torch.nn.Linear(config["hidden_size"], config["vocab_size"], bias=False)
     with open(os.path.join(verifier_path, "model.safetensors.index.json"), "r") as f:
         index_json = json.loads(f.read())
     head_path = index_json["weight_map"]["lm_head.weight"]
-    with safetensors.safe_open(os.path.join(verifier_path, head_path), framework="pt", device=device) as f:
+    with safetensors.safe_open(os.path.join(verifier_path, head_path), framework="pt") as f:
         tensor = f.get_slice("lm_head.weight")[:, :config["hidden_size"]]
     head.weight.data = tensor
     head.eval()
