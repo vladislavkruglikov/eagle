@@ -24,14 +24,18 @@ def _train() -> None:
     p_w = 0.1
     grad_clip = 0.5
     save_freq = arguments.save_freq
+    save_freq_steps = arguments.save_freq_steps
+    if save_freq is not None and save_freq_steps is not None:
+        raise ValueError("One of --save-freq or --save-freq-steps must be set")
     cpdir = arguments.cpdir
     eagle_config_path = arguments.eagle_config
     lr = arguments.lr
+    micro_bs = arguments.micro_bs
 
     print("Initializing accelerate")
     torch.backends.cuda.matmul.allow_tf32 = True
     accelerate.utils.set_seed(0)
-    accelerator = accelerate.Accelerator(mixed_precision="bf16")
+    accelerator = accelerate.Accelerator()
     
     if accelerator.is_main_process:
         print("Initializing wandb")
@@ -45,8 +49,8 @@ def _train() -> None:
     print("Initializing datasets")
     train_dataset = Dataset(dataset_path=train_dataset_path, max_model_len=max_model_len)
     test_dataset = Dataset(dataset_path=test_dataset_path, max_model_len=max_model_len)
-    train_data_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=1, num_workers=0, collate_fn=Collator())
-    test_data_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=1, num_workers=0, collate_fn=Collator())
+    train_data_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=micro_bs, num_workers=0, collate_fn=Collator())
+    test_data_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=micro_bs, num_workers=0, collate_fn=Collator())
     
     print("Initializing eagle model")
     config = transformers.AutoConfig.from_pretrained(eagle_config_path)
@@ -63,6 +67,8 @@ def _train() -> None:
     )
 
     model.train()
+
+    steps = 0
 
     print("Starting training loop")
     for epoch in range(epochs):
@@ -100,15 +106,25 @@ def _train() -> None:
         epoch_mean_loss = epoch_sum_loss / num_batches
 
         if accelerator.is_local_main_process:
-            print('Epoch [{}/{}], Loss: {:.4f}'.format(epoch + 1, epochs, epoch_mean_loss))
+            print('Epoch {}/{}, Step {} Loss: {:.4f}'.format(epoch + 1, epochs, steps, epoch_mean_loss))
             wandb.log({"train/epochloss": epoch_mean_loss})
-            if (epoch + 1) % save_freq == 0:
+            if save_freq is not None and (epoch + 1) % save_freq == 0:
                 _save_vllm_checkpoint(
                     accelerator=accelerator,
                     model=model,
                     eagle_config_path=eagle_config_path,
                     save_directory=f"{cpdir}/epoch_{epoch + 1}"
                 )
+
+            if save_freq_steps is not None and (steps + 1) % save_freq_steps == 0:
+                _save_vllm_checkpoint(
+                    accelerator=accelerator,
+                    model=model,
+                    eagle_config_path=eagle_config_path,
+                    save_directory=f"{cpdir}/step_{steps + 1}"
+                )
+        
+        steps += 1
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -158,15 +174,27 @@ def _parse_arguments() -> argparse.Namespace:
         help="path to folder to save vllm checkpoints"
     )
     parser.add_argument(
-        "--save_freq",
+        "--save-freq",
         type=int,
-        default=10,
+        required=False,
+        help="save_freq"
+    )
+    parser.add_argument(
+        "--save-freq-steps",
+        type=int,
+        required=False,
         help="save_freq"
     )
     parser.add_argument(
         "--eagle-config",
         type=pathlib.Path,
         help="path to eagle config"
+    )
+    parser.add_argument(
+        "--micro-bs",
+        type=int,
+        default=1,
+        help="save_freq"
     )
     return parser.parse_args()
 
