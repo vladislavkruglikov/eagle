@@ -13,6 +13,10 @@ def _prepare_dataset() -> None:
     tokenizer_path: pathlib.Path = arguments.tokenizer
     device: str = arguments.device
     output_dir: pathlib.Path = arguments.output
+    n = arguments.n
+    frac = arguments.frac
+    if n is not None and frac is not None:
+        raise ValueError("One of --n or --frac must be set")
 
     print("Loading tokenizer")
     tokenizer = transformers.AutoTokenizer.from_pretrained(str(tokenizer_path), use_fast=True)
@@ -24,6 +28,10 @@ def _prepare_dataset() -> None:
         ["train"]
         .shuffle(seed=0)
     )
+    print(f"Dataset has {len(dataset)} rows")
+    indices = range(n) if n is not None else range(int(frac * len(dataset)))
+    dataset = dataset.select(indices)
+    print(f"Dataset after select has {len(dataset)} rows")
 
     print("Tokenizing dataset")
     dataset = dataset.map(
@@ -82,6 +90,16 @@ def _parse_arguments() -> argparse.Namespace:
         type=pathlib.Path,
         required=True,
         help="Directory where the processed dataset will be stored"
+    )
+    parser.add_argument(
+        "--n",
+        type=int,
+        help="Number of sampels to take"
+    )
+    parser.add_argument(
+        "--frac",
+        type=float,
+        help="Number of sampels to take from 0.0 to 1.0 percent"
     )
     return parser.parse_args()
 

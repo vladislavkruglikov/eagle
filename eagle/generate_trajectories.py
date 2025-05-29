@@ -14,6 +14,10 @@ def _prepare_dataset() -> None:
     device: str = arguments.device
     output_path: pathlib.Path = arguments.output
     max_new_tokens = arguments.max_new_tokens
+    n = arguments.n
+    frac = arguments.frac
+    if n is not None and frac is not None:
+        raise ValueError("One of --n or --frac must be set")
 
     print("Loading tokenizer")
     tokenizer = transformers.AutoTokenizer.from_pretrained(str(tokenizer_path), use_fast=True)
@@ -25,6 +29,10 @@ def _prepare_dataset() -> None:
         ["train"]
         .shuffle(seed=0)
     )
+    print(f"Dataset has {len(dataset)} rows")
+    indices = range(n) if n is not None else range(int(frac * len(dataset)))
+    dataset = dataset.select(indices)
+    print(f"Dataset after select has {len(dataset)} rows")
 
     dataset = dataset.map(
         lambda example: _tokenize_dataset(example=example, tokenizer=tokenizer),
@@ -89,6 +97,16 @@ def _parse_arguments() -> argparse.Namespace:
         type=int,
         default=128,
         help="Max new tokens generated"
+    )
+    parser.add_argument(
+        "--n",
+        type=int,
+        help="Number of sampels to take"
+    )
+    parser.add_argument(
+        "--frac",
+        type=float,
+        help="Number of sampels to take from 0.0 to 1.0 percent"
     )
     return parser.parse_args()
 
