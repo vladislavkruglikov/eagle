@@ -12,7 +12,8 @@ def _prepare_dataset() -> None:
     model_path: pathlib.Path = arguments.model
     tokenizer_path: pathlib.Path = arguments.tokenizer
     device: str = arguments.device
-    output_dir: pathlib.Path = arguments.output
+    output_path: pathlib.Path = arguments.output
+    max_new_tokens = arguments.max_new_tokens
     n = arguments.n
     frac = arguments.frac
     if n is not None and frac is not None:
@@ -33,12 +34,11 @@ def _prepare_dataset() -> None:
     dataset = dataset.select(indices)
     print(f"Dataset after select has {len(dataset)} rows")
 
-    print("Tokenizing dataset")
     dataset = dataset.map(
         lambda example: _tokenize_dataset(example=example, tokenizer=tokenizer),
         batched=False,
         num_proc=1,
-        remove_columns=dataset.column_names
+        desc="Tokenizing dataset"
     )
 
     print("Convert dataset to torch tensors")
@@ -46,26 +46,27 @@ def _prepare_dataset() -> None:
 
     print("Loading model")
     model = transformers.AutoModelForCausalLM.from_pretrained(model_path,  device_map=device, torch_dtype="auto").eval()
+
+    dataset = dataset.map(
+        lambda example: _enrich_messages(example=example, tokenizer=tokenizer, model=model, device=device, max_new_tokens=max_new_tokens),
+        batched=False,
+        num_proc=1,
+        desc="Generating assistant responses"
+    )
     
-    if not output_dir.exists():
-        output_dir.mkdir()
-    
-    print("Generating hidden states and saving checkpoints")
-    for i, example in enumerate(dataset):
-        enriched_example = _enrich_with_hidden_state(example=example, model=model, device=device)
-        print(f"Saving {output_dir}/{i}.ckpt")
-        torch.save(enriched_example, f'{output_dir}/{i}.ckpt')
+    print("Saving to disk")
+    dataset.select_columns(["id", "messages"]).to_json(output_path)
 
 
 def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Process a raw chat dataset using a verifier model and tokenizer."
+        description="Generate trajectories"
     )
     parser.add_argument(
         "--input",
         type=pathlib.Path,
         required=True,
-        help="Path to JSON lines chat dataset as described in documentation"
+        help="Path to JSON lines chat dataset as described in documentation wheres lines end with user response"
     )
     parser.add_argument(
         "--model",
@@ -89,7 +90,13 @@ def _parse_arguments() -> argparse.Namespace:
         "--output",
         type=pathlib.Path,
         required=True,
-        help="Directory where the processed dataset will be stored"
+        help="Path to jsonlines file where the processed dataset will be stored"
+    )
+    parser.add_argument(
+        "--max-new-tokens",
+        type=int,
+        default=128,
+        help="Max new tokens generated"
     )
     parser.add_argument(
         "--n",
@@ -108,23 +115,28 @@ def _tokenize_dataset(example: dict, tokenizer: transformers.AutoTokenizer) -> d
     result = tokenizer.apply_chat_template(
         example["messages"], 
         tokenize=True, 
-        add_generation_prompt=False, 
-        return_dict=True,
-        return_assistant_tokens_mask=True
+        add_generation_prompt=True, 
+        return_dict=True
     )
 
     return {
         "input_ids": result["input_ids"],
-        "loss_mask": result["assistant_masks"]
-    }  
+        "messages": example["messages"], 
+    }
 
 
 @torch.no_grad()
-def _enrich_with_hidden_state(example: dict[str, torch.LongTensor], model: transformers.AutoModelForCausalLM, device: str) -> dict:
-    input_ids = example["input_ids"].to(device).unsqueeze(0)
-    outs_big = model(input_ids, output_hidden_states=True)
-    hidden_state_big = outs_big.hidden_states[-1][0]
-    return example | {"hidden_state": hidden_state_big}
+def _enrich_messages(example: dict, tokenizer: transformers.AutoTokenizer, model: transformers.AutoModelForCausalLM, device: str, max_new_tokens: int) -> dict:
+    outputs = model.generate(
+        example["input_ids"].unsqueeze(0).to(device), 
+        do_sample=False,
+        max_new_tokens=max_new_tokens
+    ) 
+    prompt_tokens_count = example["input_ids"].shape[0]
+    assistant_tokens = outputs[0][prompt_tokens_count:]
+    assistant_text = tokenizer.decode(assistant_tokens)
+    example["messages"].append({"role": "assistant", "content": assistant_text})
+    return example
 
 
 if __name__ == "__main__":

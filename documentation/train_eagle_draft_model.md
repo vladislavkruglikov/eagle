@@ -3,16 +3,17 @@
 Train model, mps is enabled by default on mac, to disable use --cpu
 
 ```bash
-accelerate launch eagle/train.py \
+accelerate launch --mixed_precision bf16 eagle/train.py \
     --train-input ./tokenized_dataset \
     --test-input ./tokenized_dataset \
-    --model /mnt/eagle/models/meta-llama2-7b-chat-hf \
+    --model /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat \
     --max-model-len 2048 \
     --epochs 100 \
     --lr 2e-4 \
+    --save-freq-steps 10 \
     --cpdir ./checkpoints \
-    --save_freq 10 \
-    --eagle-config ./resources/eagle_config.json
+    --eagle-config ./resources/eagle_config.json \
+    --micro-bs 1
 ```
 
 Or docker
@@ -33,7 +34,8 @@ docker run \
     --max-model-len 2048 \
     --epochs 100 \
     --lr 2e-4 \
+    --save-freq-steps 10 \
     --cpdir /mnt/checkpoints \
-    --save_freq 10 \
-    --eagle-config /mnt/resources/eagle_config.json
+    --eagle-config /mnt/resources/eagle_config.json \
+    --micro-bs 1
 ```
