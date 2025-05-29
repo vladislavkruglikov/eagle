@@ -26,6 +26,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           push: true
+          file: docker/Dockerfile
           tags: |
             ${{ secrets.DOCKER_USERNAME }}/eagle:${{ github.ref_name }}
             ${{ secrets.DOCKER_USERNAME }}/eagle:latest
