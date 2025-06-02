@@ -2,6 +2,7 @@ import os
 import json
 import torch
 import pathlib
+import clearml
 import argparse
 import accelerate
 import safetensors
@@ -31,6 +32,8 @@ def _train() -> None:
     eagle_config_path = arguments.eagle_config
     lr = arguments.lr
     micro_bs = arguments.micro_bs
+    clearml_project_name = arguments.project
+    clearml_task_name = arguments.task
 
     print("Initializing accelerate")
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -38,9 +41,9 @@ def _train() -> None:
     accelerator = accelerate.Accelerator()
     
     if accelerator.is_main_process:
-        print("Initializing wandb")
-        import wandb
-        wandb.init(project="eagle")
+        print("Initializing clearml")
+        clearml_task = clearml.Task.init(project_name=clearml_project_name, task_name=clearml_task_name)
+        clearml_logger = clearml_task.get_logger()
 
     print("Initializing lm head")
     lm_head = _initialize_verifier_lm_head(verifier_path=model_path)
@@ -107,7 +110,12 @@ def _train() -> None:
 
         if accelerator.is_local_main_process:
             print('Epoch {}/{}, Step {} Loss: {:.4f}'.format(epoch + 1, epochs, steps, epoch_mean_loss))
-            wandb.log({"train/epochloss": epoch_mean_loss})
+            clearml_logger.report_scalar(
+                title="train/epochloss",
+                series="series",
+                value=epoch_mean_loss,
+                iteration=epoch + 1
+            )
             if save_freq is not None and (epoch + 1) % save_freq == 0:
                 _save_vllm_checkpoint(
                     accelerator=accelerator,
@@ -195,6 +203,18 @@ def _parse_arguments() -> argparse.Namespace:
         type=int,
         default=1,
         help="save_freq"
+    )
+    parser.add_argument(
+        "--project",
+        type=str,
+        default="eagle",
+        help="clearml project name"
+    )
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="task",
+        help="clearml task name"
     )
     return parser.parse_args()
 

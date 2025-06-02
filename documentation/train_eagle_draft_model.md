@@ -3,7 +3,16 @@
 Train model, mps is enabled by default on mac, to disable use --cpu
 
 ```bash
-accelerate launch --mixed_precision bf16 eagle/train.py \
+export CUDA_VISIBLE_DEVCES=0
+
+export CLEARML_WEB_HOST=
+export CLEARML_API_HOST=
+export CLEARML_FILES_HOST=
+export CLEARML_API_ACCESS_KEY=
+export CLEARML_API_SECRET_KEY=
+export CLEARML_API_HOST_VERIFY_CERT=
+
+accelerate launch --num_processes 1 --mixed_precision bf16 eagle/train.py \
     --train-input ./tokenized_dataset \
     --test-input ./tokenized_dataset \
     --model /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat \
@@ -13,7 +22,9 @@ accelerate launch --mixed_precision bf16 eagle/train.py \
     --save-freq-steps 10 \
     --cpdir ./checkpoints \
     --eagle-config ./resources/eagle_config.json \
-    --micro-bs 1
+    --micro-bs 1 \
+    --project eagle \
+    --task example
 ```
 
 Or docker

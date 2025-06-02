@@ -12,9 +12,9 @@ setuptools.setup(
     install_requires=[
         "accelerate==1.7.0",
         "datasets==3.6.0",
-        "torch==2.5.1",
+        "torch>=2.5.1",
         "transformers==4.52.3",
-        "wandb==0.19.11",
+        "clearml==2.0.0"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
