@@ -121,9 +121,10 @@ def _train() -> None:
 
                 optimizer.step()
 
-                print('[Train] Step {}, Step loss: {:.4f}, Step accuracy: {:.4f}'.format(steps + 1, loss.item(), step_accuracy))
-                clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps + 1)
-                clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=step_accuracy, iteration=steps + 1)
+                steps += 1
+                print('[Train] Step {}, Step loss: {:.4f}, Step accuracy: {:.4f}'.format(steps, loss.item(), step_accuracy))
+                clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
+                clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=step_accuracy, iteration=steps)
         
         epoch_mean_loss = epoch_sum_loss / num_batches
 
@@ -142,12 +143,12 @@ def _train() -> None:
                     save_directory=f"{cpdir}/epoch_{epoch + 1}"
                 )
 
-            if save_freq_steps is not None and (steps + 1) % save_freq_steps == 0:
+            if save_freq_steps is not None and steps % save_freq_steps == 0:
                 _save_vllm_checkpoint(
                     accelerator=accelerator,
                     model=model,
                     eagle_config_path=eagle_config_path,
-                    save_directory=f"{cpdir}/step_{steps + 1}"
+                    save_directory=f"{cpdir}/step_{steps}"
                 )
             
             # Accuracy
@@ -187,8 +188,6 @@ def _train() -> None:
             print('[Validation] Epoch {}/{}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, val_mean_loss, val_mean_accuracy))
             clearml_logger.report_scalar(title="validation/epochloss", series="series", value=val_mean_loss, iteration=epoch + 1)
             clearml_logger.report_scalar(title="validation/epochaccuracy", series="series", value=val_mean_accuracy, iteration=epoch + 1)
-
-        steps += 1
 
 
 def _parse_arguments() -> argparse.Namespace:
