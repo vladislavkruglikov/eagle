@@ -33,6 +33,13 @@ def convert_sharegpt_dataset() -> None:
         desc="Converting dataset"
     )
 
+    dataset = dataset.filter(
+        _conversation_roles_are_correct,
+        desc="Filtering by conversation user/assistant/user/..."
+    )
+
+    print(f"Dataset after filtering has {len(dataset)} rows")
+
     print("Saving to disk")
     dataset.to_json(output_path)
 
@@ -72,6 +79,15 @@ def _convert_sharegpt_dataset(example: dict) -> dict:
         new_turn = {"role": role, "content": turn["value"]}
         new_turns.append(new_turn)
     return {"messages": new_turns}
+
+
+def _conversation_roles_are_correct(example: dict) -> bool:
+    previous_role = "user"
+    for turn in example["messages"]:
+        if turn["role"] == previous_role:
+            return False
+        previous_role = turn["role"]
+    return True
 
 
 if __name__ == "__main__":
