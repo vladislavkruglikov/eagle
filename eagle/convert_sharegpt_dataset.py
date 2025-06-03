@@ -82,7 +82,7 @@ def _convert_sharegpt_dataset(example: dict) -> dict:
 
 
 def _conversation_roles_are_correct(example: dict) -> bool:
-    previous_role = "user"
+    previous_role = "assistant"
     for turn in example["messages"]:
         if turn["role"] == previous_role:
             return False
