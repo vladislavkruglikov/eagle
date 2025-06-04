@@ -103,8 +103,10 @@ def _train() -> None:
                     predicted_probabilities=out_logp, 
                     loss_mask=batch["loss_mask"]
                 )
-                epoch_correctly_predicted_tokens_count += correctly_predicted_tokens_count
-                epoch_total_tokens_to_predict_count += total_tokens_to_predict
+                # If none means loss mask contained 0 only thus we can not compute accuracy and report it
+                if step_accuracy is not None:
+                    epoch_correctly_predicted_tokens_count += correctly_predicted_tokens_count
+                    epoch_total_tokens_to_predict_count += total_tokens_to_predict
 
                 loss_mask = batch["loss_mask"][:, :, None]
                 plogp = target_p * out_logp
@@ -122,19 +124,30 @@ def _train() -> None:
                 optimizer.step()
 
                 steps += 1
-                print('[Train] Step {}, Step loss: {:.4f}, Step accuracy: {:.4f}'.format(steps, loss.item(), step_accuracy))
-                clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
-                clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=step_accuracy, iteration=steps)
+                if step_accuracy is not None:
+                    print('[Train] Step {}, Step loss: {:.4f}, Step accuracy: {:.4f}'.format(steps, loss.item(), step_accuracy))
+                    clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
+                    clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=step_accuracy, iteration=steps)
+                else:
+                    print('[Train] Step {}, Step loss: {:.4f}'.format(steps, loss.item()))
+                    clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
         
         epoch_mean_loss = epoch_sum_loss / num_batches
 
         # Accuracy
-        epoch_mean_accuracy = epoch_correctly_predicted_tokens_count / epoch_total_tokens_to_predict_count
+        if epoch_total_tokens_to_predict_count == 0:
+            epoch_mean_accuracy = None
+        else:
+            epoch_mean_accuracy = epoch_correctly_predicted_tokens_count / epoch_total_tokens_to_predict_count
 
         if accelerator.is_local_main_process:
-            print('[Train] Epoch {}/{}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, epoch_mean_loss, epoch_mean_accuracy))
             clearml_logger.report_scalar(title="train/epochloss", series="series", value=epoch_mean_loss, iteration=epoch + 1)
-            clearml_logger.report_scalar(title="train/epochaccuracy", series="series", value=epoch_mean_accuracy, iteration=epoch + 1)
+            if epoch_mean_accuracy is not None:
+                print('[Train] Epoch {}/{}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, epoch_mean_loss, epoch_mean_accuracy))
+                clearml_logger.report_scalar(title="train/epochaccuracy", series="series", value=epoch_mean_accuracy, iteration=epoch + 1)
+            else:
+                print('[Train] Epoch {}/{}, Epoch loss: {:.4f}'.format(epoch + 1, epochs, epoch_mean_loss))
+                
             if save_freq is not None and (epoch + 1) % save_freq == 0:
                 _save_vllm_checkpoint(
                     accelerator=accelerator,
@@ -171,8 +184,9 @@ def _train() -> None:
                         predicted_probabilities=out_logp, 
                         loss_mask=batch["loss_mask"]
                     )
-                    eval_correctly_predicted_tokens_count += correctly_predicted_tokens_count
-                    eval_total_tokens_to_predict_count += total_tokens_to_predict
+                    if correctly_predicted_tokens_count is not None:
+                        eval_correctly_predicted_tokens_count += correctly_predicted_tokens_count
+                        eval_total_tokens_to_predict_count += total_tokens_to_predict
 
                     loss_mask = batch["loss_mask"][:, :, None]
                     plogp = target_p * out_logp
@@ -184,10 +198,16 @@ def _train() -> None:
                     eval_num_batches += 1
 
             val_mean_loss = eval_loss_sum / eval_num_batches
-            val_mean_accuracy = eval_correctly_predicted_tokens_count / eval_total_tokens_to_predict_count
-            print('[Validation] Epoch {}/{}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, val_mean_loss, val_mean_accuracy))
+            if eval_total_tokens_to_predict_count != 0:
+                val_mean_accuracy = eval_correctly_predicted_tokens_count / eval_total_tokens_to_predict_count
+            else:
+                val_mean_accuracy = None
             clearml_logger.report_scalar(title="validation/epochloss", series="series", value=val_mean_loss, iteration=epoch + 1)
-            clearml_logger.report_scalar(title="validation/epochaccuracy", series="series", value=val_mean_accuracy, iteration=epoch + 1)
+            if val_mean_accuracy is not None:
+                print('[Validation] Epoch {}/{}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, val_mean_loss, val_mean_accuracy))
+                clearml_logger.report_scalar(title="validation/epochaccuracy", series="series", value=val_mean_accuracy, iteration=epoch + 1)
+            else:
+                print('[Validation] Epoch {}/{}, Epoch loss: {:.4f}'.format(epoch + 1, epochs, val_mean_loss))
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -308,10 +328,17 @@ def _compute_accuracy(
     target_probabilities: torch.FloatTensor,  # bs, seq_len, vocab_size
     predicted_probabilities: torch.FloatTensor,  # bs, seq_len, vocab_size
     loss_mask: torch.LongTensor # bs, seq_len
-) -> typing.Tuple[float, int, int]:
+) -> typing.Tuple[typing.Optional[float], typing.Optional[int], typing.Optional[int]]:
+    total_tokens_to_predict = loss_mask.sum().item()
+    # It can happen that when filterd by maximum model length we completely remove
+    # assistant replies with loss and have only user replies for which we do not want
+    # to compute loss. In order not to divide later in computation of accuracy by zero
+    # we return None
+    if total_tokens_to_predict == 0:
+        return None, None, None
+
     _, target_max_p_tokens = torch.max(target_probabilities, 2)
     _, ealge_max_p_tokens = torch.max(predicted_probabilities, 2)
-    total_tokens_to_predict = loss_mask.sum().item()
     correctly_predicted_tokens_count = ((target_max_p_tokens == ealge_max_p_tokens) * loss_mask.squeeze()).sum().item()
     step_accuracy = correctly_predicted_tokens_count / total_tokens_to_predict
     return step_accuracy, correctly_predicted_tokens_count, total_tokens_to_predict
