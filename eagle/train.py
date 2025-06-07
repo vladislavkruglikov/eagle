@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import torch
 import typing
@@ -22,19 +23,20 @@ def _train() -> None:
     model_path: pathlib.Path = arguments.model
     max_model_len = arguments.max_model_len
     epochs = arguments.epochs
+    steps = arguments.steps
+    warmup_steps: typing.Optional[int] = arguments.warmup_steps
     v_w = 1.0
     p_w = 0.1
     grad_clip = 0.5
-    save_freq = arguments.save_freq
-    save_freq_steps = arguments.save_freq_steps
-    if save_freq is not None and save_freq_steps is not None:
-        raise ValueError("One of --save-freq or --save-freq-steps must be set")
+    save_freq_steps = arguments.save
     cpdir = arguments.cpdir
     eagle_config_path = arguments.eagle_config
     lr = arguments.lr
     micro_bs = arguments.micro_bs
     clearml_project_name = arguments.project
     clearml_task_name = arguments.task
+    evaluate_every_steps: int = arguments.evaluate
+    state: pathlib.Path = arguments.state
 
     print("Initializing accelerate")
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -59,16 +61,39 @@ def _train() -> None:
     print("Initializing eagle model")
     config = transformers.AutoConfig.from_pretrained(eagle_config_path)
     model = Model(config, load_emb=True, path=model_path).to(config.torch_dtype)
+    accelerator.register_for_checkpointing(model)
+    if accelerator.is_local_main_process:
+        eagle_parameters_count_m = _count_parameters(model) / 10 ** 6
+        print(f"Eagle parameters count in millions: {eagle_parameters_count_m}")
+        clearml_logger.report_single_value(
+            name="Eagle parameters count in millions", 
+            value=eagle_parameters_count_m
+        )
     # for k, v in model.named_parameters():
         # print(k, v.dtype)
 
-    print("Initializing loss, optimizers, etc")
+    print("Initializing criterion, optimizer, lr scheduler")
     criterion = torch.nn.SmoothL1Loss(reduction="none")
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
+    accelerator.register_for_checkpointing(optimizer)
+    if warmup_steps is not None:
+        scheduler = transformers.get_linear_schedule_with_warmup(
+            optimizer=optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=steps
+        )
+        accelerator.register_for_checkpointing(scheduler)
+        model, lm_head, optimizer, train_data_loader, test_data_loader, scheduler = accelerator.prepare(
+            model, lm_head, optimizer, train_data_loader, test_data_loader, scheduler
+        )
+    else:
+        model, lm_head, optimizer, train_data_loader, test_data_loader = accelerator.prepare(
+            model, lm_head, optimizer, train_data_loader, test_data_loader
+        )
 
-    model, lm_head, optimizer, train_data_loader, test_data_loader = accelerator.prepare(
-        model, lm_head, optimizer, train_data_loader, test_data_loader
-    )
+    if state is not None:
+        print(f"Loading state from {state}")
+        accelerator.load_state(state)
 
     model.train()
 
@@ -85,6 +110,7 @@ def _train() -> None:
         epoch_total_tokens_to_predict_count = 0
 
         for batch in train_data_loader:
+            batch_start_time = time.perf_counter() 
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 predict = model(batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
@@ -114,7 +140,7 @@ def _train() -> None:
                 vloss = criterion(predict, batch["target"])
                 vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
                 loss = v_w * vloss + p_w * ploss
-                
+
                 accelerator.backward(loss)
                 accelerator.clip_grad_value_(model.parameters(), grad_clip)
 
@@ -122,15 +148,63 @@ def _train() -> None:
                 epoch_sum_loss += loss.item()
 
                 optimizer.step()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
 
+                batch_end_time = time.perf_counter()
+                
                 steps += 1
+                if warmup_steps is not None:
+                    scheduler.step()
+                    if accelerator.is_local_main_process:
+                        print('[Train] Epoch {}/{}, Step {}, lr: {:.8f}'.format(epoch + 1, epochs, steps, scheduler.get_last_lr()[0]))
+                        clearml_logger.report_scalar(title="lr", series="series", value=scheduler.get_last_lr()[0], iteration=steps)
+
+                if accelerator.is_local_main_process:
+                    processed_tokens = loss_mask.sum()
+                    time_taken = batch_end_time - batch_start_time
+                    throughput = processed_tokens / time_taken
+                    print('[Train] Epoch {}/{}, Step {}, throughput: {:.2f} tokens/s'.format(epoch + 1, epochs, steps, throughput))
+                    clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=throughput, iteration=steps)
+
                 if step_accuracy is not None:
-                    print('[Train] Step {}, Step loss: {:.4f}, Step accuracy: {:.4f}'.format(steps, loss.item(), step_accuracy))
-                    clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
-                    clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=step_accuracy, iteration=steps)
+                    if accelerator.is_local_main_process:
+                        print('[Train] Epoch {}/{}, Step {}, Step loss: {:.4f}, Step accuracy: {:.4f}'.format(epoch + 1, epochs, steps, loss.item(), step_accuracy))
+                        clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
+                        clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=step_accuracy, iteration=steps)
                 else:
-                    print('[Train] Step {}, Step loss: {:.4f}'.format(steps, loss.item()))
-                    clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
+                    if accelerator.is_local_main_process:
+                        print('[Train] Epoch {}/{}, Step {}, Step loss: {:.4f}'.format(epoch + 1, epochs, steps, loss.item()))
+                        clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
+
+                if accelerator.is_local_main_process and steps % save_freq_steps == 0:
+                    _save_vllm_checkpoint(
+                        accelerator=accelerator,
+                        model=model,
+                        eagle_config_path=eagle_config_path,
+                        save_directory=f"{cpdir}/step_{steps}/vllm"
+                    )
+
+                    _save_checkpoint_state(
+                        accelerator=accelerator,
+                        model=model,
+                        save_directory=f"{cpdir}/step_{steps}/state"
+                    )
+                
+                if accelerator.is_local_main_process and steps % evaluate_every_steps == 0:
+                    _eval(
+                        model=model,
+                        lm_head=lm_head,
+                        test_data_loader=test_data_loader,
+                        criterion=criterion,
+                        clearml_logger=clearml_logger,
+                        v_w=v_w,
+                        p_w=p_w,
+                        epoch=epoch,
+                        epochs=epochs,
+                        steps=steps,
+                        accelerator=accelerator
+                    )
         
         epoch_mean_loss = epoch_sum_loss / num_batches
 
@@ -141,73 +215,44 @@ def _train() -> None:
             epoch_mean_accuracy = epoch_correctly_predicted_tokens_count / epoch_total_tokens_to_predict_count
 
         if accelerator.is_local_main_process:
+            # Always report last training metrics
             clearml_logger.report_scalar(title="train/epochloss", series="series", value=epoch_mean_loss, iteration=epoch + 1)
             if epoch_mean_accuracy is not None:
                 print('[Train] Epoch {}/{}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, epoch_mean_loss, epoch_mean_accuracy))
                 clearml_logger.report_scalar(title="train/epochaccuracy", series="series", value=epoch_mean_accuracy, iteration=epoch + 1)
             else:
                 print('[Train] Epoch {}/{}, Epoch loss: {:.4f}'.format(epoch + 1, epochs, epoch_mean_loss))
-                
-            if save_freq is not None and (epoch + 1) % save_freq == 0:
-                _save_vllm_checkpoint(
-                    accelerator=accelerator,
-                    model=model,
-                    eagle_config_path=eagle_config_path,
-                    save_directory=f"{cpdir}/epoch_{epoch + 1}"
-                )
-
-            if save_freq_steps is not None and steps % save_freq_steps == 0:
-                _save_vllm_checkpoint(
-                    accelerator=accelerator,
-                    model=model,
-                    eagle_config_path=eagle_config_path,
-                    save_directory=f"{cpdir}/step_{steps}"
-                )
             
-            # Accuracy
-            model.eval()
-            eval_correctly_predicted_tokens_count = 0
-            eval_total_tokens_to_predict_count = 0
-            eval_loss_sum = 0.0
-            eval_num_batches = 0
-            for batch in test_data_loader:
-                with torch.no_grad():
-                    predict = model(batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-                    target_head = lm_head(batch["target"])
-                    target_p = torch.nn.Softmax(dim=2)(target_head)
-                    target_p = target_p.detach()  # bs, seq_len, vocab_size
-                    out_head = lm_head(predict)
-                    out_logp = torch.nn.LogSoftmax(dim=2)(out_head)  # bs, seq_len, vocab_size
-                    # Accuracy
-                    _, correctly_predicted_tokens_count, total_tokens_to_predict = _compute_accuracy(
-                        target_probabilities=target_p, 
-                        predicted_probabilities=out_logp, 
-                        loss_mask=batch["loss_mask"]
-                    )
-                    if correctly_predicted_tokens_count is not None:
-                        eval_correctly_predicted_tokens_count += correctly_predicted_tokens_count
-                        eval_total_tokens_to_predict_count += total_tokens_to_predict
+    
+    if accelerator.is_local_main_process:
+        # Always eval in the end of the tarining
+        _eval(
+            model=model,
+            lm_head=lm_head,
+            test_data_loader=test_data_loader,
+            criterion=criterion,
+            clearml_logger=clearml_logger,
+            v_w=v_w,
+            p_w=p_w,
+            epoch=epochs - 1,
+            epochs=epochs,
+            steps=steps,
+            accelerator=accelerator
+        )
 
-                    loss_mask = batch["loss_mask"][:, :, None]
-                    plogp = target_p * out_logp
-                    ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
-                    vloss = criterion(predict, batch["target"])
-                    vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
-                    loss = v_w * vloss + p_w * ploss
-                    eval_loss_sum += loss.item()
-                    eval_num_batches += 1
+        # Always save last checkpoint
+        _save_vllm_checkpoint(
+            accelerator=accelerator,
+            model=model,
+            eagle_config_path=eagle_config_path,
+            save_directory=f"{cpdir}/step_{steps}/vllm"
+        )
 
-            val_mean_loss = eval_loss_sum / eval_num_batches
-            if eval_total_tokens_to_predict_count != 0:
-                val_mean_accuracy = eval_correctly_predicted_tokens_count / eval_total_tokens_to_predict_count
-            else:
-                val_mean_accuracy = None
-            clearml_logger.report_scalar(title="validation/epochloss", series="series", value=val_mean_loss, iteration=epoch + 1)
-            if val_mean_accuracy is not None:
-                print('[Validation] Epoch {}/{}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, val_mean_loss, val_mean_accuracy))
-                clearml_logger.report_scalar(title="validation/epochaccuracy", series="series", value=val_mean_accuracy, iteration=epoch + 1)
-            else:
-                print('[Validation] Epoch {}/{}, Epoch loss: {:.4f}'.format(epoch + 1, epochs, val_mean_loss))
+        _save_checkpoint_state(
+            accelerator=accelerator,
+            model=model,
+            save_directory=f"{cpdir}/step_{steps}/state"
+        )
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -241,32 +286,51 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--epochs",
         type=int,
-        default=100,
-        help="epochs"
+        default=1_000,
+        help="Number of epochs to train"
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=1_000,
+        help="Number of steps to train"
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        required=False,
+        default=1_000,
+        help="Number of warmup steps to train"
     )
     parser.add_argument(
         "--lr",
         type=float,
         default=1e-4,
-        help="Learning reate"
+        help="Learning rate"
     )
     parser.add_argument(
         "--cpdir",
         type=pathlib.Path,
         default="./checkpoints",
-        help="path to folder to save vllm checkpoints"
+        help="Path to folder to save checkpoints"
     )
     parser.add_argument(
-        "--save-freq",
-        type=int,
+        "--state",
+        type=pathlib.Path,
         required=False,
-        help="save_freq"
+        help="Path to folder to load checkpoint from if train from checkpoint"
     )
     parser.add_argument(
-        "--save-freq-steps",
+        "--save",
         type=int,
         required=False,
-        help="save_freq"
+        help="Save model after every number of steps"
+    )
+    parser.add_argument(
+        "--evaluate",
+        type=int,
+        required=False,
+        help="Evaluate model after every number of steps"
     )
     parser.add_argument(
         "--eagle-config",
@@ -277,19 +341,19 @@ def _parse_arguments() -> argparse.Namespace:
         "--micro-bs",
         type=int,
         default=1,
-        help="save_freq"
+        help="Micro batch size"
     )
     parser.add_argument(
         "--project",
         type=str,
         default="eagle",
-        help="clearml project name"
+        help="Clearml project name"
     )
     parser.add_argument(
         "--task",
         type=str,
         default="task",
-        help="clearml task name"
+        help="Clearml task name"
     )
     return parser.parse_args()
 
@@ -324,6 +388,14 @@ def _save_vllm_checkpoint(
         json.dump(cfg, wf, indent=4)
 
 
+def _save_checkpoint_state(
+    accelerator: accelerate.Accelerator,
+    model: torch.nn.Module,
+    save_directory: pathlib.Path
+) -> None:
+    accelerator.save_state(output_dir=save_directory)
+
+
 def _compute_accuracy(
     target_probabilities: torch.FloatTensor,  # bs, seq_len, vocab_size
     predicted_probabilities: torch.FloatTensor,  # bs, seq_len, vocab_size
@@ -342,6 +414,71 @@ def _compute_accuracy(
     correctly_predicted_tokens_count = ((target_max_p_tokens == ealge_max_p_tokens) * loss_mask.squeeze()).sum().item()
     step_accuracy = correctly_predicted_tokens_count / total_tokens_to_predict
     return step_accuracy, correctly_predicted_tokens_count, total_tokens_to_predict
+
+
+def _eval(
+    model: torch.nn.Module, 
+    lm_head: torch.nn.Module, 
+    test_data_loader: torch.utils.data.DataLoader, 
+    criterion: torch.nn.Module, 
+    clearml_logger,
+    v_w: float,
+    p_w: float,
+    epoch: int,
+    epochs: int,
+    steps: int,
+    accelerator
+) -> None:
+    # Accuracy
+    model.eval()
+    eval_correctly_predicted_tokens_count = 0
+    eval_total_tokens_to_predict_count = 0
+    eval_loss_sum = 0.0
+    eval_num_batches = 0
+    for batch in test_data_loader:
+        with torch.no_grad():
+            predict = model(batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+            target_head = lm_head(batch["target"])
+            target_p = torch.nn.Softmax(dim=2)(target_head)
+            target_p = target_p.detach()  # bs, seq_len, vocab_size
+            out_head = lm_head(predict)
+            out_logp = torch.nn.LogSoftmax(dim=2)(out_head)  # bs, seq_len, vocab_size
+            # Accuracy
+            _, correctly_predicted_tokens_count, total_tokens_to_predict = _compute_accuracy(
+                target_probabilities=target_p, 
+                predicted_probabilities=out_logp, 
+                loss_mask=batch["loss_mask"]
+            )
+            if correctly_predicted_tokens_count is not None:
+                eval_correctly_predicted_tokens_count += correctly_predicted_tokens_count
+                eval_total_tokens_to_predict_count += total_tokens_to_predict
+
+            loss_mask = batch["loss_mask"][:, :, None]
+            plogp = target_p * out_logp
+            ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
+            vloss = criterion(predict, batch["target"])
+            vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
+            loss = v_w * vloss + p_w * ploss
+            eval_loss_sum += loss.item()
+            eval_num_batches += 1
+
+    val_mean_loss = eval_loss_sum / eval_num_batches
+    if eval_total_tokens_to_predict_count != 0:
+        val_mean_accuracy = eval_correctly_predicted_tokens_count / eval_total_tokens_to_predict_count
+    else:
+        val_mean_accuracy = None
+    if accelerator.is_local_main_process:
+        clearml_logger.report_scalar(title="validation/epochloss", series="series", value=val_mean_loss, iteration=epoch + 1)
+        clearml_logger.report_scalar(title="validation/steploss", series="series", value=val_mean_loss, iteration=steps)
+        if val_mean_accuracy is not None:
+            print('[Validation] Epoch {}/{}, Step {}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, steps, val_mean_loss, val_mean_accuracy))
+            clearml_logger.report_scalar(title="validation/epochaccuracy", series="series", value=val_mean_accuracy, iteration=epoch + 1)
+        else:
+            print('[Validation] Epoch {}/{}, Step {}, Epoch loss: {:.4f}'.format(epoch + 1, epochs, steps, val_mean_loss))
+
+
+def _count_parameters(model: torch.nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 if __name__ == "__main__":
