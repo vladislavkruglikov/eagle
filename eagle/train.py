@@ -61,6 +61,13 @@ def _train() -> None:
     config = transformers.AutoConfig.from_pretrained(eagle_config_path)
     model = Model(config, load_emb=True, path=model_path).to(config.torch_dtype)
     accelerator.register_for_checkpointing(model)
+    if accelerator.is_local_main_process:
+        eagle_parameters_count_m = _count_parameters(model) / 10 ** 6
+        print(f"Eagle parameters count in millions: {eagle_parameters_count_m}")
+        clearml_logger.report_single_value(
+            name="Eagle parameters count in millions", 
+            value=eagle_parameters_count_m
+        )
     # for k, v in model.named_parameters():
         # print(k, v.dtype)
 
@@ -454,6 +461,10 @@ def _eval(
             clearml_logger.report_scalar(title="validation/epochaccuracy", series="series", value=val_mean_accuracy, iteration=epoch + 1)
         else:
             print('[Validation] Epoch {}/{}, Step {}, Epoch loss: {:.4f}'.format(epoch + 1, epochs, steps, val_mean_loss))
+
+
+def _count_parameters(model: torch.nn.Module) -> int:
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
 if __name__ == "__main__":
