@@ -14,7 +14,7 @@ class Dataset(torch.utils.data.Dataset):
         return self._dataset_size
 
     def __getitem__(self, index: int):
-        data = torch.load(f"{self._dataset_path}/{index}.ckpt", map_location="cpu")
+        data = torch.load(f"{self._dataset_path}/{index}.ckpt", map_location="cpu", weights_only=True)
         data["hidden_state"] = data["hidden_state"][:self._max_model_len]
         data["input_ids"] = data["input_ids"][:self._max_model_len]
         data["loss_mask"] = data["loss_mask"][:self._max_model_len]

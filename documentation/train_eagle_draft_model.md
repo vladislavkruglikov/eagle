@@ -17,15 +17,20 @@ accelerate launch --num_processes 1 --mixed_precision bf16 eagle/train.py \
     --test-input ./tokenized_dataset \
     --model /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat \
     --max-model-len 2048 \
+    --steps 1 \
     --epochs 100 \
     --lr 2e-4 \
-    --save-freq-steps 10 \
+    --warmup-steps 4
+    --evaluate 4 \
+    --save 10 \
     --cpdir ./checkpoints \
     --eagle-config ./resources/eagle_config.json \
     --micro-bs 1 \
     --project eagle \
     --task example
 ```
+
+To train from checkpoint add `--state ./path_to_checkpoint`
 
 Or docker
 
