@@ -1,0 +1,13 @@
+## 📄 Documentation
+
+Below I listed **steps** which you can go through in order **to train and deploy in vLLM your first eagle draft model**
+
+* [Prepare environment](./documentation/prepare_environment.md)
+* [Download model](./documentation/download_model.md)
+* [Prepare raw chat dataset](./documentation/prepare_raw_chat_dataset.md)
+* [(Optionally) Generate trajectories](./documentation/generate_trajectories.md)
+* [Tokenize dataset](./documentation/tokenize_dataset.md)
+* [Train eagle draft model](./documentation/train_eagle_draft_model.md)
+* Deploy eagle in vLLM
+  * [GPU](./documentation/deploy_eagle_gpu.md)
+  * [CPU mac os from source](./documentation/deploy_cpu_mac_os_from_source.md)
