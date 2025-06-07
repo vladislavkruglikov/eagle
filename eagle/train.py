@@ -45,7 +45,15 @@ def _train() -> None:
     
     if accelerator.is_main_process:
         print("Initializing clearml")
-        clearml_task = clearml.Task.init(project_name=clearml_project_name, task_name=clearml_task_name)
+        clearml_task = clearml.Task.init(
+            project_name=clearml_project_name, 
+            task_name=clearml_task_name, 
+            reuse_last_task_id=False,
+            continue_last_task=False,
+            output_uri=False,
+            auto_connect_frameworks=False, 
+            auto_resource_monitoring=False,
+        )
         clearml_logger = clearml_task.get_logger()
 
     print("Initializing lm head")
