@@ -14,6 +14,8 @@ def _prepare_dataset() -> None:
     device: str = arguments.device
     output_dir: pathlib.Path = arguments.output
     n = arguments.n
+    start = arguments.start
+    end = arguments.end
     frac = arguments.frac
     if n is not None and frac is not None:
         raise ValueError("One of --n or --frac must be set")
@@ -29,6 +31,12 @@ def _prepare_dataset() -> None:
         .shuffle(seed=0)
     )
     print(f"Dataset has {len(dataset)} rows")
+    if start is None:
+        start = 0
+    if end is None:
+        end = len(dataset)
+    dataset = dataset.select(range(start, end))
+    print(f"Dataset after [start, end) has {len(dataset)} rows")
     indices = range(n) if n is not None else range(int(frac * len(dataset)))
     dataset = dataset.select(indices)
     print(f"Dataset after select has {len(dataset)} rows")
@@ -51,7 +59,7 @@ def _prepare_dataset() -> None:
         output_dir.mkdir()
     
     print("Generating hidden states and saving checkpoints")
-    for i, example in enumerate(dataset):
+    for i, example in enumerate(dataset, start=start):
         enriched_example = _enrich_with_hidden_state(example=example, model=model, device=device)
         print(f"Saving {output_dir}/{i}.ckpt")
         torch.save(enriched_example, f'{output_dir}/{i}.ckpt')
@@ -90,6 +98,18 @@ def _parse_arguments() -> argparse.Namespace:
         type=pathlib.Path,
         required=True,
         help="Directory where the processed dataset will be stored"
+    )
+    parser.add_argument(
+        "--start",
+        type=int,
+        required=False,
+        help="Start position slice"
+    )
+    parser.add_argument(
+        "--end",
+        type=int,
+        required=False,
+        help="End position slice"
     )
     parser.add_argument(
         "--n",
