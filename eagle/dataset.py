@@ -18,7 +18,7 @@ class Dataset(torch.utils.data.Dataset):
         data["hidden_state"] = data["hidden_state"][:self._max_model_len]
         data["input_ids"] = data["input_ids"][:self._max_model_len]
         data["loss_mask"] = data["loss_mask"][:self._max_model_len]
-        data["attention_mask"] = torch.ones(self._max_model_len)
+        data["attention_mask"] = torch.ones(data["loss_mask"].shape[-1])
         data["input_ids"] = torch.cat((data["input_ids"][1:], torch.tensor([0])), dim=0)
         # hidden_state already exists and it is input. Remember in eagle paper we
         # sent hidden state + next token. But learn to predict next hidden state aswell

@@ -4,3 +4,6 @@ checkpoints
 wandb
 vllm
 venv
+eagle/__pycache__
+models
+*.crt
