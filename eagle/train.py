@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import torch
 import typing
@@ -109,6 +110,7 @@ def _train() -> None:
         epoch_total_tokens_to_predict_count = 0
 
         for batch in train_data_loader:
+            batch_start_time = time.perf_counter() 
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 predict = model(batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
@@ -146,12 +148,24 @@ def _train() -> None:
                 epoch_sum_loss += loss.item()
 
                 optimizer.step()
+                if torch.cuda.is_available():
+                    torch.cuda.synchronize()
+
+                batch_end_time = time.perf_counter()
+                
                 steps += 1
                 if warmup_steps is not None:
                     scheduler.step()
                     if accelerator.is_local_main_process:
                         print('[Train] Epoch {}/{}, Step {}, lr: {:.8f}'.format(epoch + 1, epochs, steps, scheduler.get_last_lr()[0]))
                         clearml_logger.report_scalar(title="lr", series="series", value=scheduler.get_last_lr()[0], iteration=steps)
+
+                if accelerator.is_local_main_process:
+                    processed_tokens = loss_mask.sum()
+                    time_taken = batch_end_time - batch_start_time
+                    throughput = processed_tokens / time_taken
+                    print('[Train] Epoch {}/{}, Step {}, throughput: {:.2f} tokens/s'.format(epoch + 1, epochs, steps, throughput))
+                    clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=throughput, iteration=steps)
 
                 if step_accuracy is not None:
                     if accelerator.is_local_main_process:
