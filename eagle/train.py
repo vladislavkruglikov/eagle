@@ -186,11 +186,11 @@ def _train() -> None:
                         clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
 
                 if accelerator.is_local_main_process and steps % save_freq_steps == 0:
-                    _save_vllm_checkpoint(
+                    _save_sglang_checkpoint(
                         accelerator=accelerator,
                         model=model,
                         eagle_config_path=eagle_config_path,
-                        save_directory=f"{cpdir}/step_{steps}/vllm"
+                        save_directory=f"{cpdir}/step_{steps}/sglang"
                     )
 
                     _save_checkpoint_state(
@@ -249,11 +249,11 @@ def _train() -> None:
         )
 
         # Always save last checkpoint
-        _save_vllm_checkpoint(
+        _save_sglang_checkpoint(
             accelerator=accelerator,
             model=model,
             eagle_config_path=eagle_config_path,
-            save_directory=f"{cpdir}/step_{steps}/vllm"
+            save_directory=f"{cpdir}/step_{steps}/sglang"
         )
 
         _save_checkpoint_state(
@@ -382,7 +382,7 @@ def _initialize_verifier_lm_head(verifier_path: pathlib.Path) -> torch.nn.Linear
     return head
 
 
-def _save_vllm_checkpoint(
+def _save_sglang_checkpoint(
     accelerator: accelerate.Accelerator, 
     model: torch.nn.Module, 
     eagle_config_path: pathlib.Path, 
@@ -391,7 +391,7 @@ def _save_vllm_checkpoint(
     accelerator.save_model(model, save_directory=save_directory)
     with open(eagle_config_path) as rf:
         cfg = json.load(rf)
-    cfg = {"model_type": "eagle", "model": cfg}
+    cfg["architectures"][0] = "LlamaForCausalLMEagle"
     with open(f"{save_directory}/config.json", "w") as wf:
         json.dump(cfg, wf, indent=4)
 
