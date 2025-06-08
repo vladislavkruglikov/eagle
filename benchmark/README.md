@@ -26,8 +26,7 @@ docker run \
         --n 64 \
         --bs 1 \
         --output benchmark/report_alpaca_bs1_wo_eagle.json \
-        --temperature 0
-    "
+        --temperature 0"
 ```
 
 Benchmark base model with draft model with batch size 1 meaning only 1 request runs at most at the same time
@@ -37,8 +36,9 @@ docker run \
     --gpus all \
     -e CUDA_VISIBLE_DEVICES=1 \
     -v ./models/meta-llama2-7b-chat-hf:/mnt/llama2-7b \
-    -v ./eagle_model:/mnt/eagle \
+    -v ./step5000/vllm:/mnt/eagle \
     -v ./benchmark:/opt/benchmark \
+    -v ./checkpoints:/opt/checkpoints \
     --ipc=host \
     --shm-size 32g \
     lmsysorg/sglang:v0.4.6.post5-cu124 \
@@ -48,11 +48,10 @@ docker run \
         --n 64 \
         --bs 1 \
         --output benchmark/report_alpaca_bs1_with_eagle_new_new.json \
-        --eagle /mnt/eagle \
+        --eagle /opt/checkpoints/step_10/sglang \
         --steps 4 \
         --k 1 \
         --draft 4 \
         --speculative-algorithm EAGLE \
-        --temperature 0
-    "
+        --temperature 0"
 ```

@@ -5,6 +5,7 @@ Train model, mps is enabled by default on mac, to disable use --cpu
 ```bash
 export CUDA_VISIBLE_DEVCES=0
 
+export CLEARML_OFFLINE_MODE=1
 export CLEARML_WEB_HOST=
 export CLEARML_API_HOST=
 export CLEARML_FILES_HOST=
@@ -37,20 +38,21 @@ Or docker
 ```bash
 docker run \
     --gpus all \
-    -v $(pwd)/../eagle/resources:/mnt/resources \
+    -v $(pwd)/resources:/mnt/resources \
     -v $(pwd)/checkpoints:/mnt/checkpoints \
-    -v $(pwd)/../eagle/tokenized_dataset:/mnt/tokenized_dataset \
+    -v $(pwd)/tokenized_dataset:/mnt/tokenized_dataset \
+    -v $(pwd)/models/meta-llama2-7b-chat-hf:/mnt/model \
     -e WANDB_MODE=offline \
     -e CUDA_VISIBLE_DEVICES=0 \
-    -v /mnt/eagle/models/meta-llama2-7b-chat-hf:/mnt/model \
+    -e CLEARML_OFFLINE_MODE=1 \
     eagle \
-    accelerate launch --num_processes 1 --mixed_precision bf16 eagle/train.py eagle/train.py \
+    accelerate launch --num_processes 1 --mixed_precision bf16 eagle/train.py \
     --train-input /mnt/tokenized_dataset \
     --test-input /mnt/tokenized_dataset \
     --model /mnt/model \
     --max-model-len 2048 \
     --steps 10 \
-    --epochs 100 \
+    --epochs 10 \
     --lr 2e-4 \
     --warmup-steps 4 \
     --evaluate 3 \
