@@ -25,7 +25,9 @@ docker run \
         --prompts benchmark/alpaca.jsonl \
         --n 64 \
         --bs 1 \
-        --output benchmark/report_alpaca_bs1_wo_eagle.json"
+        --output benchmark/report_alpaca_bs1_wo_eagle.json \
+        --temperature 0
+    "
 ```
 
 Benchmark base model with draft model with batch size 1 meaning only 1 request runs at most at the same time
@@ -45,10 +47,12 @@ docker run \
         --prompts benchmark/alpaca.jsonl \
         --n 64 \
         --bs 1 \
-        --output benchmark/report_alpaca_bs1_with_eagle.json \
+        --output benchmark/report_alpaca_bs1_with_eagle_new_new.json \
         --eagle /mnt/eagle \
-        --steps 3 \
-        --k 4 \
-        --draft 16 \
-        --speculative-algorithm EAGLE"
+        --steps 4 \
+        --k 1 \
+        --draft 4 \
+        --speculative-algorithm EAGLE \
+        --temperature 0
+    "
 ```

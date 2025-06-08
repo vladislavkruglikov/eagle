@@ -18,6 +18,7 @@ def benchmark() -> None:
     speculative_algorithm = arguments.speculative_algorithm
     n = arguments.n
     batch_size = arguments.bs
+    temperature = arguments.temperature
     frac = arguments.frac
     if n is not None and frac is not None:
         raise ValueError("One of --n or --frac must be set")
@@ -51,12 +52,12 @@ def benchmark() -> None:
             speculative_num_steps=draft_steps,
             speculative_eagle_topk=top_k,
             speculative_num_draft_tokens=draft_tokens,
-            max_running_requests=batch_size
+            max_running_requests=batch_size,
         )
     
     # Send requests to llm engine
     sampling_params = {
-        "temperature": 0,
+        "temperature": temperature,
     }
 
     total_verify_ct = 0
@@ -158,6 +159,12 @@ def _parse_arguments() -> argparse.Namespace:
         type=pathlib.Path,
         required=True,
         help="Path to report"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        required=True,
+        help="Temperature"
     )
     return parser.parse_args()
 
