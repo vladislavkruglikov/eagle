@@ -33,11 +33,6 @@ def convert_sharegpt_dataset() -> None:
         desc="Converting dataset"
     )
 
-    dataset = dataset.filter(
-        _conversation_roles_are_correct,
-        desc="Filtering by conversation user/assistant/user/..."
-    )
-
     print(f"Dataset after filtering has {len(dataset)} rows")
 
     print("Saving to disk")
@@ -69,6 +64,9 @@ def _parse_arguments() -> argparse.Namespace:
 
 def _convert_sharegpt_dataset(example: dict) -> dict:
     new_turns = []
+    # https://github.com/SafeAILab/EAGLE/blob/4a9cf3a1f6cd4a294e6d30a4e7c77cba246d7ca5/eagle/ge_data/ge_data_all_llama2chat.py#L65
+    system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
+    new_turns.append({"role": "system", "content": system_prompt})
     for turn in example["conversations"]:
         if turn["from"] == "gpt":
             role = "assistant"
@@ -78,16 +76,10 @@ def _convert_sharegpt_dataset(example: dict) -> dict:
             raise ValueError("Unknown role")
         new_turn = {"role": role, "content": turn["value"]}
         new_turns.append(new_turn)
+    # https://github.com/SafeAILab/EAGLE/blob/4a9cf3a1f6cd4a294e6d30a4e7c77cba246d7ca5/eagle/ge_data/ge_data_all_llama2chat.py#L69
+    if new_turns[1]["role"] == "assistant":
+        new_turns = [new_turns[0]] + new_turns[2:]
     return {"messages": new_turns}
-
-
-def _conversation_roles_are_correct(example: dict) -> bool:
-    previous_role = "assistant"
-    for turn in example["messages"]:
-        if turn["role"] == previous_role:
-            return False
-        previous_role = turn["role"]
-    return True
 
 
 if __name__ == "__main__":

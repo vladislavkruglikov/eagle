@@ -45,7 +45,7 @@ def _prepare_dataset() -> None:
     dataset = dataset.map(
         lambda example: _tokenize_dataset(example=example, tokenizer=tokenizer),
         batched=False,
-        num_proc=1,
+        num_proc=4,
         remove_columns=dataset.column_names
     )
 

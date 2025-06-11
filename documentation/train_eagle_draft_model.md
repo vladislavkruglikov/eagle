@@ -28,7 +28,9 @@ accelerate launch --num_processes 1 --mixed_precision bf16 eagle/train.py \
     --eagle-config ./resources/eagle_config.json \
     --micro-bs 1 \
     --project eagle \
-    --task example
+    --task example \
+    --noise-low -0.1 \
+    --noise-high 0.1
 ```
 
 To train from checkpoint add `--state ./path_to_checkpoint`
@@ -41,7 +43,7 @@ docker run \
     -v $(pwd)/resources:/mnt/resources \
     -v $(pwd)/checkpoints:/mnt/checkpoints \
     -v $(pwd)/tokenized_dataset:/mnt/tokenized_dataset \
-    -v $(pwd)/models/meta-llama2-7b-chat-hf:/mnt/model \
+    -v $(pwd)/models/llama2:/mnt/model \
     -e WANDB_MODE=offline \
     -e CUDA_VISIBLE_DEVICES=0 \
     -e CLEARML_OFFLINE_MODE=1 \
@@ -51,15 +53,17 @@ docker run \
     --test-input /mnt/tokenized_dataset \
     --model /mnt/model \
     --max-model-len 2048 \
-    --steps 10 \
-    --epochs 10 \
-    --lr 2e-4 \
-    --warmup-steps 4 \
-    --evaluate 3 \
-    --save 10 \
+    --steps 1000000 \
+    --epochs 4 \
+    --lr 3e-5 \
+    --warmup-steps 10 \
+    --evaluate 1000 \
+    --save 1000 \
     --cpdir /mnt/checkpoints \
     --eagle-config /mnt/resources/eagle_config.json \
     --micro-bs 1 \
     --project eagle \
-    --task example
+    --task example \
+    --noise-low -0.1 \
+    --noise-high 0.1
 ```

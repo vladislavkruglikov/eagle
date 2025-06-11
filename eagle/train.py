@@ -37,6 +37,8 @@ def _train() -> None:
     clearml_task_name = arguments.task
     evaluate_every_steps: int = arguments.evaluate
     state: pathlib.Path = arguments.state
+    transform_uniform_low = arguments.noise_low
+    transformer_uniform_high = arguments.noise_high
 
     print("Initializing accelerate")
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -61,8 +63,18 @@ def _train() -> None:
     # print(next(lm_head.parameters()).dtype)
 
     print("Initializing datasets")
-    train_dataset = Dataset(dataset_path=train_dataset_path, max_model_len=max_model_len)
-    test_dataset = Dataset(dataset_path=test_dataset_path, max_model_len=max_model_len)
+    train_dataset = Dataset(
+        dataset_path=train_dataset_path, 
+        max_model_len=max_model_len, 
+        transform_uniform_low=transform_uniform_low,
+        transformer_uniform_high=transformer_uniform_high
+    )
+    test_dataset = Dataset(
+        dataset_path=test_dataset_path, 
+        max_model_len=max_model_len,
+        transform_uniform_low=transform_uniform_low,
+        transformer_uniform_high=transformer_uniform_high
+    )
     train_data_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=micro_bs, num_workers=0, collate_fn=Collator())
     test_data_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=micro_bs, num_workers=0, collate_fn=Collator())
     
@@ -213,6 +225,8 @@ def _train() -> None:
                         steps=steps,
                         accelerator=accelerator
                     )
+
+                    model.train()
         
         epoch_mean_loss = epoch_sum_loss / num_batches
 
@@ -247,6 +261,8 @@ def _train() -> None:
             steps=steps,
             accelerator=accelerator
         )
+
+        model.train()
 
         # Always save last checkpoint
         _save_sglang_checkpoint(
@@ -362,6 +378,18 @@ def _parse_arguments() -> argparse.Namespace:
         type=str,
         default="task",
         help="Clearml task name"
+    )
+    parser.add_argument(
+        "--noise-low",
+        type=float,
+        default=0.0,
+        help="Uniform hiddenstate noise low"
+    )
+    parser.add_argument(
+        "--noise-high",
+        type=float,
+        default=0.0,
+        help="Uniform hiddenstate noise high"
     )
     return parser.parse_args()
 
