@@ -1,13 +1,9 @@
 ## 📄 Documentation
 
-Below I listed **steps** which you can go through in order **to train and deploy in vLLM your first eagle draft model**
+This page describes steps to reproduce [eagle 1 paper](https://arxiv.org/abs/2401.15077v1) for llama 2 chat 7b but you can change your base model and dataset to reproduce for your own needs. It is that simple 
 
 * [Prepare environment](prepare_environment.md)
 * [Download model](download_model.md)
 * [Prepare raw chat dataset](prepare_raw_chat_dataset.md)
-* [(Optionally) Generate trajectories](generate_trajectories.md)
 * [Tokenize dataset](tokenize_dataset.md)
 * [Train eagle draft model](train_eagle_draft_model.md)
-* Deploy eagle in vLLM
-  * [GPU](deploy_eagle_gpu.md)
-  * [CPU mac os from source](deploy_cpu_mac_os_from_source.md)

@@ -1,0 +1,11 @@
+train_datasets:
+  - name: "sharegpt"
+    remote: "s3://your_bucket/dataset"
+    local: "./stream_train_datasets/1"
+    repeat: 0.2
+
+test_datasets:
+  - name: "sharegpt"
+    remote: "s3://your_bucket/dataset"
+    local: "./stream_test_datasets/1"
+    repeat: 0.1

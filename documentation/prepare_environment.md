@@ -1,18 +1,18 @@
 ## Prepare environment 
 
-Use pre built docker instead
-
-```bash
-docker pull vladislavkruglikov/eagle:latest
-```
-
-Or build docker yourself
+You can build a docker 
 
 ```bash
 docker build --tag eagle -f docker/Dockerfile .
 ```
 
-Or create local environment and install current package
+Or use already built docker
+
+```bash
+docker pull vladislavkruglikov/eagle:latest
+```
+
+But in this get started guide for simplicity I will go with virtual environment. Migration to docker is simple and easy
 
 ```bash
 python3 -m venv venv

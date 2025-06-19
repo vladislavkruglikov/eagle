@@ -14,7 +14,10 @@ setuptools.setup(
         "datasets==3.6.0",
         "torch>=2.5.1",
         "transformers==4.52.3",
-        "clearml==2.0.0"
+        "clearml==2.0.0",
+        "mosaicml-streaming==0.12.0",
+        "awscli==1.34.24",
+        "boto3==1.35.24"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",

@@ -1,11 +1,13 @@
 import os
 import time
 import json
+import yaml
 import torch
 import typing
 import pathlib
 import clearml
 import argparse
+import streaming
 import accelerate
 import safetensors
 import transformers
@@ -18,8 +20,7 @@ from eagle.collator import Collator
 def _train() -> None:
     arguments = _parse_arguments()
     
-    train_dataset_path: pathlib.Path = arguments.train_input
-    test_dataset_path: pathlib.Path = arguments.test_input
+    data_path: pathlib.Path = arguments.data
     model_path: pathlib.Path = arguments.model
     max_model_len = arguments.max_model_len
     epochs = arguments.epochs
@@ -39,6 +40,10 @@ def _train() -> None:
     state: pathlib.Path = arguments.state
     transform_uniform_low = arguments.noise_low
     transformer_uniform_high = arguments.noise_high
+
+    with open(data_path, 'r') as f:
+        data_config = yaml.safe_load(f)
+        print(data_config)
 
     print("Initializing accelerate")
     torch.backends.cuda.matmul.allow_tf32 = True
@@ -63,18 +68,41 @@ def _train() -> None:
     # print(next(lm_head.parameters()).dtype)
 
     print("Initializing datasets")
+
+    train_streams = []
+    for dataset in data_config["train_datasets"]:
+        stream = streaming.Stream(remote=dataset["remote"], local=dataset["local"], repeat=dataset["repeat"])
+        train_streams.append(stream)
+
     train_dataset = Dataset(
-        dataset_path=train_dataset_path, 
+        streams=train_streams,
+        shuffle=True,
+        shuffle_seed=0,
+        batch_size=micro_bs,
         max_model_len=max_model_len, 
         transform_uniform_low=transform_uniform_low,
         transformer_uniform_high=transformer_uniform_high
     )
+
+    print(f"len(train_dataset)={len(train_dataset)}")
+
+    test_streams = []
+    for dataset in data_config["test_datasets"]:
+        stream = streaming.Stream(remote=dataset["remote"], local=dataset["local"], repeat=dataset["repeat"])
+        test_streams.append(stream)
+    
     test_dataset = Dataset(
-        dataset_path=test_dataset_path, 
-        max_model_len=max_model_len,
+        streams=test_streams,
+        shuffle=True,
+        shuffle_seed=0,
+        batch_size=micro_bs,
+        max_model_len=max_model_len, 
         transform_uniform_low=transform_uniform_low,
         transformer_uniform_high=transformer_uniform_high
     )
+
+    print(f"len(test_dataset)={len(test_dataset)}")
+
     train_data_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=micro_bs, num_workers=0, collate_fn=Collator())
     test_data_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=micro_bs, num_workers=0, collate_fn=Collator())
     
@@ -129,8 +157,8 @@ def _train() -> None:
         epoch_correctly_predicted_tokens_count = 0
         epoch_total_tokens_to_predict_count = 0
 
+        start_before_next_batch_iteration = time.perf_counter()
         for batch in train_data_loader:
-            batch_start_time = time.perf_counter() 
             with accelerator.accumulate(model):
                 optimizer.zero_grad()
                 predict = model(batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
@@ -182,7 +210,7 @@ def _train() -> None:
 
                 if accelerator.is_local_main_process:
                     processed_tokens = loss_mask.sum()
-                    time_taken = batch_end_time - batch_start_time
+                    time_taken = batch_end_time - start_before_next_batch_iteration
                     throughput = processed_tokens / time_taken
                     print('[Train] Epoch {}/{}, Step {}, throughput: {:.2f} tokens/s'.format(epoch + 1, epochs, steps, throughput))
                     clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=throughput, iteration=steps)
@@ -228,6 +256,8 @@ def _train() -> None:
 
                     model.train()
         
+                start_before_next_batch_iteration = time.perf_counter()
+
         epoch_mean_loss = epoch_sum_loss / num_batches
 
         # Accuracy
@@ -284,16 +314,10 @@ def _parse_arguments() -> argparse.Namespace:
         description="Process a raw chat dataset using a verifier model and tokenizer."
     )
     parser.add_argument(
-        "--train-input",
+        "--data",
         type=pathlib.Path,
         required=True,
-        help="Path to tokenized train dataset folder"
-    )
-    parser.add_argument(
-        "--test-input",
-        type=pathlib.Path,
-        required=True,
-        help="Path to tokenized test dataset folder"
+        help="Path to yaml data preset"
     )
     parser.add_argument(
         "--model",
