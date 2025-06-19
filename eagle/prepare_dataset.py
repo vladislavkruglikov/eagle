@@ -2,6 +2,7 @@ import torch
 import pathlib
 import argparse
 import datasets
+import streaming
 import transformers
 
 
@@ -12,7 +13,7 @@ def _prepare_dataset() -> None:
     model_path: pathlib.Path = arguments.model
     tokenizer_path: pathlib.Path = arguments.tokenizer
     device: str = arguments.device
-    output_dir: pathlib.Path = arguments.output
+    output_dir = arguments.output
     n = arguments.n
     start = arguments.start
     end = arguments.end
@@ -54,15 +55,21 @@ def _prepare_dataset() -> None:
 
     print("Loading model")
     model = transformers.AutoModelForCausalLM.from_pretrained(model_path,  device_map=device, torch_dtype="auto").eval()
-    
-    if not output_dir.exists():
-        output_dir.mkdir()
-    
+
     print("Generating hidden states and saving checkpoints")
-    for i, example in enumerate(dataset, start=start):
-        enriched_example = _enrich_with_hidden_state(example=example, model=model, device=device)
-        print(f"Saving {output_dir}/{i}.ckpt")
-        torch.save(enriched_example, f'{output_dir}/{i}.ckpt')
+    # print(streaming.base.format.mds.encodings.get_mds_encodings())
+    # https://docs.mosaicml.com/projects/streaming/en/stable/preparing_datasets/basic_dataset_conversion.html
+    fields = {
+        "input_ids": "ndarray:int64",
+        "loss_mask": "ndarray:int64",
+        "hidden_state": "ndarray:float16",
+    }
+    with streaming.MDSWriter(out=str(output_dir), columns=fields, progress_bar=True) as out:
+        for i, example in enumerate(dataset, start=start):
+            enriched_example = _enrich_with_hidden_state(example=example, model=model, device=device)
+            enriched_example = {k: v.numpy() for k, v in enriched_example.items()}
+            print(f"Saving {i + 1}/{len(dataset)}")
+            out.write(enriched_example)
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -95,7 +102,7 @@ def _parse_arguments() -> argparse.Namespace:
     )
     parser.add_argument(
         "--output",
-        type=pathlib.Path,
+        type=str,
         required=True,
         help="Directory where the processed dataset will be stored"
     )
@@ -144,7 +151,7 @@ def _enrich_with_hidden_state(example: dict[str, torch.LongTensor], model: trans
     input_ids = example["input_ids"].to(device).unsqueeze(0)
     outs_big = model(input_ids, output_hidden_states=True)
     hidden_state_big = outs_big.hidden_states[-1][0]
-    return example | {"hidden_state": hidden_state_big}
+    return example | {"hidden_state": hidden_state_big.to("cpu")}
 
 
 if __name__ == "__main__":

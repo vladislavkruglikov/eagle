@@ -1,32 +1,44 @@
 ## Tokenize dataset
 
-Command bellow tokenizes dataset and create all needed masks that will be retrieved during training and also generate hidden states using verifier model such that in training we can use thoose instead of generating them in online training loop
+In this example I describe how to run distributed tokenization process with remote storage. For example suppose we have 2 machines with GPUs which we can use in order to extract hidden states and form a dataset. We can split whole data between that 2 machines. Label them independently in parallel and then merge into single dataset
 
 ```bash
-rm -rf ./tokenized_dataset
+export AWS_ACCESS_KEY_ID=
+export AWS_SECRET_ACCESS_KEY=
+export AWS_ENDPOINT_URL=
+```
+
+Label first shard. Label 50 examples starting from index 0
+
+```bash
 python ./eagle/prepare_dataset.py \
-    --input ./resources/raw_example_dataset.jsonl \
-    --model /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat \
-    --tokenizer /Users/vladislavkruglikov/Projects/download_and_research_eagle/llama2-7b-chat \
-    --device mps \
-    --output ./tokenized_dataset \
-    --frac 1.0
+    --input ./sharegpt.jsonl \
+    --model models/meta-llama2-7b-chat-hf \
+    --tokenizer models/meta-llama2-7b-chat-hf \
+    --device cuda \
+    --output s3://your_bucket/dataset/from_0_to_50 \
+    --n 50 \
+    --start 0
 ```
 
-Or use docker
+Label second shard. Label 50 examples starting from index 50
 
 ```bash
-docker run \
-    --gpus all \
-    -v $(pwd)/resources:/mnt/resources \
-    -v /mnt/eagle/models/meta-llama2-7b-chat-hf:/mnt/model \
-    -v $(pwd)/tokenized_dataset:/mnt/tokenized_dataset \
-    eagle \
-    python ./eagle/prepare_dataset.py \
-    --input /mnt/resources/raw_example_dataset.jsonl \
-    --model /mnt/model \
-    --tokenizer /mnt/model \
+python ./eagle/prepare_dataset.py \
+    --input ./sharegpt.jsonl \
+    --model models/meta-llama2-7b-chat-hf \
+    --tokenizer models/meta-llama2-7b-chat-hf \
     --device cuda \
-    --output /mnt/tokenized_dataset \
-    --frac 1.0
+    --output s3://your_bucket/dataset/from_50_to_100 \
+    --n 50 \
+    --start 50
 ```
+
+Merge
+
+```bash
+python ./eagle/merge_prepared_datasets.py \
+    --path s3://your_bucket/dataset
+```
+
+Now you can use this path as path to training dataset
