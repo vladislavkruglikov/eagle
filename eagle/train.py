@@ -81,7 +81,9 @@ def _train() -> None:
         batch_size=micro_bs,
         max_model_len=max_model_len, 
         transform_uniform_low=transform_uniform_low,
-        transformer_uniform_high=transformer_uniform_high
+        transformer_uniform_high=transformer_uniform_high,
+        predownload=512,
+        cache_limit="10gb"
     )
 
     print(f"len(train_dataset)={len(train_dataset)}")
@@ -98,7 +100,9 @@ def _train() -> None:
         batch_size=micro_bs,
         max_model_len=max_model_len, 
         transform_uniform_low=transform_uniform_low,
-        transformer_uniform_high=transformer_uniform_high
+        transformer_uniform_high=transformer_uniform_high,
+        predownload=512,
+        cache_limit="10gb"
     )
 
     print(f"len(test_dataset)={len(test_dataset)}")

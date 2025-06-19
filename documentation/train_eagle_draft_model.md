@@ -3,7 +3,7 @@
 Train model
 
 ```bash
-export CUDA_VISIBLE_DEVCES=0
+export CUDA_VISIBLE_DEVICES=0
 
 export CLEARML_OFFLINE_MODE=1
 export CLEARML_WEB_HOST=
