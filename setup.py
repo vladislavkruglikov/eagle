@@ -10,14 +10,12 @@ setuptools.setup(
     url="https://github.com/vladislavkruglikov/eagle",
     packages=setuptools.find_packages(where="."),
     install_requires=[
-        "accelerate==1.7.0",
+        "accelerate==1.8.1",
         "datasets==3.6.0",
-        "torch>=2.5.1",
-        "transformers==4.52.3",
+        "torch==2.7.1",
+        "transformers==4.52.4",
         "clearml==2.0.0",
-        "mosaicml-streaming==0.12.0",
-        "awscli==1.34.24",
-        "boto3==1.35.24"
+        "flash-attn==2.8.0.post2"
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
