@@ -1,4 +1,4 @@
-## Download model
+## Prepare model
 
 Downloading model might require restricted access so you might need to export your token before
 

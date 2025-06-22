@@ -1,190 +1,159 @@
 import os
 import time
 import json
-import yaml
 import torch
 import typing
 import pathlib
+import logging
 import clearml
 import argparse
-import streaming
+import datasets
 import accelerate
 import safetensors
 import transformers
 
 from eagle.model import Model
-from eagle.dataset import Dataset
-from eagle.collator import Collator
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 
 def _train() -> None:
     arguments = _parse_arguments()
-    
-    data_path: pathlib.Path = arguments.data
     model_path: pathlib.Path = arguments.model
+    dataset_path = arguments.dataset_path
     max_model_len = arguments.max_model_len
     epochs = arguments.epochs
     steps = arguments.steps
     warmup_steps: typing.Optional[int] = arguments.warmup_steps
-    v_w = 1.0
-    p_w = 0.1
-    grad_clip = 0.5
+    v_w = arguments.v_w
+    p_w = arguments.p_w
+    grad_clip = arguments.grad_clip    
     save_freq_steps = arguments.save
     cpdir = arguments.cpdir
     eagle_config_path = arguments.eagle_config
     lr = arguments.lr
-    micro_bs = arguments.micro_bs
-    clearml_project_name = arguments.project
-    clearml_task_name = arguments.task
-    evaluate_every_steps: int = arguments.evaluate
-    state: pathlib.Path = arguments.state
-    transform_uniform_low = arguments.noise_low
-    transformer_uniform_high = arguments.noise_high
-
-    with open(data_path, 'r') as f:
-        data_config = yaml.safe_load(f)
-        print(data_config)
-
-    print("Initializing accelerate")
-    torch.backends.cuda.matmul.allow_tf32 = True
+    gradient_accumulation_steps = arguments.gradient_accumulation_steps
+    
+    accelerator = accelerate.Accelerator(gradient_accumulation_steps=gradient_accumulation_steps, mixed_precision=arguments.mixed_precision)
     accelerate.utils.set_seed(0)
-    accelerator = accelerate.Accelerator()
+    torch.backends.cuda.matmul.allow_tf32 = True
     
     if accelerator.is_main_process:
-        print("Initializing clearml")
-        clearml_task = clearml.Task.init(
-            project_name=clearml_project_name, 
-            task_name=clearml_task_name, 
-            reuse_last_task_id=False,
-            continue_last_task=False,
-            output_uri=False,
-            auto_connect_frameworks=False, 
-            auto_resource_monitoring=False,
-        )
+        logging.info("Started to initialize clearml")
+        clearml_task = clearml.Task.init(project_name=arguments.project, task_name=arguments.task, reuse_last_task_id=False, continue_last_task=False, output_uri=False, auto_connect_frameworks=False, auto_resource_monitoring=False)
         clearml_logger = clearml_task.get_logger()
 
-    print("Initializing lm head")
-    lm_head = _initialize_verifier_lm_head(verifier_path=model_path)
-    # print(next(lm_head.parameters()).dtype)
+    if accelerator.is_local_main_process:
+        logging.info("Started to load target langauge model head")
+    lm_head = _initialize_verifier_lm_head(verifier_path=model_path).to(getattr(torch, arguments.model_dtype))
+    if accelerator.is_local_main_process:
+        logging.info("Target langauge model head has dtype %s", next(lm_head.parameters()).dtype)
 
-    print("Initializing datasets")
+    if accelerator.is_local_main_process:
+        logging.info("Started to load langauge model")
+    verifier_model = transformers.AutoModelForCausalLM.from_pretrained(model_path, device_map=accelerator.device, attn_implementation="flash_attention_2", torch_dtype=arguments.model_dtype)
+    verifier_model = verifier_model.eval()
+    if accelerator.is_local_main_process:
+        logging.info("Target langauge model has dtype %s", next(verifier_model.parameters()).dtype)
 
-    train_streams = []
-    for dataset in data_config["train_datasets"]:
-        stream = streaming.Stream(remote=dataset["remote"], local=dataset["local"], repeat=dataset["repeat"])
-        train_streams.append(stream)
+    if accelerator.is_local_main_process:
+        logging.info("Started to load train dataset")
+    train_dataset = datasets.load_dataset("json", data_files={"train": [str(dataset_path)]})["train"].shuffle(seed=0)
+    train_dataset = Dataset(dataset=train_dataset)
+    if accelerator.is_local_main_process:
+        logging.info("Train dataset has %d samples", len(train_dataset))
 
-    train_dataset = Dataset(
-        streams=train_streams,
-        shuffle=True,
-        shuffle_seed=0,
-        batch_size=micro_bs,
-        max_model_len=max_model_len, 
-        transform_uniform_low=transform_uniform_low,
-        transformer_uniform_high=transformer_uniform_high,
-        predownload=512,
-        cache_limit="10gb"
-    )
+    if accelerator.is_local_main_process:
+        logging.info("Started to create dataloaders")
+    train_data_loader = torch.utils.data.DataLoader(prefetch_factor=4, pin_memory=True, dataset=train_dataset, batch_size=arguments.micro_bs, num_workers=16, collate_fn=BaseCollator(model_path))
 
-    print(f"len(train_dataset)={len(train_dataset)}")
-
-    test_streams = []
-    for dataset in data_config["test_datasets"]:
-        stream = streaming.Stream(remote=dataset["remote"], local=dataset["local"], repeat=dataset["repeat"])
-        test_streams.append(stream)
-    
-    test_dataset = Dataset(
-        streams=test_streams,
-        shuffle=True,
-        shuffle_seed=0,
-        batch_size=micro_bs,
-        max_model_len=max_model_len, 
-        transform_uniform_low=transform_uniform_low,
-        transformer_uniform_high=transformer_uniform_high,
-        predownload=512,
-        cache_limit="10gb"
-    )
-
-    print(f"len(test_dataset)={len(test_dataset)}")
-
-    train_data_loader = torch.utils.data.DataLoader(dataset=train_dataset, batch_size=micro_bs, num_workers=0, collate_fn=Collator())
-    test_data_loader = torch.utils.data.DataLoader(dataset=test_dataset, batch_size=micro_bs, num_workers=0, collate_fn=Collator())
-    
-    print("Initializing eagle model")
+    if accelerator.is_local_main_process:
+        logging.info("Started to load eagle model")
     config = transformers.AutoConfig.from_pretrained(eagle_config_path)
-    model = Model(config, load_emb=True, path=model_path).to(config.torch_dtype)
+    model = Model(config, load_emb=True, path=model_path).to(getattr(torch, arguments.eagle_dtype))
     accelerator.register_for_checkpointing(model)
     if accelerator.is_local_main_process:
-        eagle_parameters_count_m = _count_parameters(model) / 10 ** 6
-        print(f"Eagle parameters count in millions: {eagle_parameters_count_m}")
+        eagle_parameters_count_b = _count_parameters(model) / 10 ** 9
+        logging.info("Eagle model has %f billion parameters", eagle_parameters_count_b)
         clearml_logger.report_single_value(
-            name="Eagle parameters count in millions", 
-            value=eagle_parameters_count_m
+            name="Eagle parameters count in billions", 
+            value=eagle_parameters_count_b
         )
-    # for k, v in model.named_parameters():
-        # print(k, v.dtype)
-
-    print("Initializing criterion, optimizer, lr scheduler")
+    
+    if accelerator.is_local_main_process:
+        logging.info("Started to load criterion")
     criterion = torch.nn.SmoothL1Loss(reduction="none")
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(0.9, 0.95))
-    accelerator.register_for_checkpointing(optimizer)
+
+    if accelerator.is_local_main_process:
+        logging.info("Started to load optimizer")
+    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, betas=(arguments.optimizer_beta_1, arguments.optimizer_beta_2))
+    
+    scheduler = None
     if warmup_steps is not None:
+        if accelerator.is_local_main_process:
+            logging.info("Started to load learning rate scheduler")
         scheduler = transformers.get_linear_schedule_with_warmup(
             optimizer=optimizer,
             num_warmup_steps=warmup_steps,
             num_training_steps=steps
         )
+
+    if accelerator.is_local_main_process:
+        logging.info("Accelerator started to register optimizer for checkpointing")
+    accelerator.register_for_checkpointing(optimizer)
+
+    if warmup_steps is not None:
+        if accelerator.is_local_main_process:
+            logging.info("Accelerator started to register learning rate scheduler for checkpointing")
         accelerator.register_for_checkpointing(scheduler)
-        model, lm_head, optimizer, train_data_loader, test_data_loader, scheduler = accelerator.prepare(
-            model, lm_head, optimizer, train_data_loader, test_data_loader, scheduler
+
+        if accelerator.is_local_main_process:
+            logging.info("Accelerator started preparation")
+        model, lm_head, optimizer, train_data_loader, scheduler = accelerator.prepare(
+            model, lm_head, optimizer, train_data_loader, scheduler
         )
     else:
-        model, lm_head, optimizer, train_data_loader, test_data_loader = accelerator.prepare(
-            model, lm_head, optimizer, train_data_loader, test_data_loader
+        if accelerator.is_local_main_process:
+            logging.info("Accelerator started preparation")
+        model, lm_head, optimizer, train_data_loader = accelerator.prepare(
+            model, lm_head, optimizer, train_data_loader
         )
 
-    if state is not None:
-        print(f"Loading state from {state}")
-        accelerator.load_state(state)
+    if arguments.state is not None:
+        if accelerator.is_local_main_process:
+            logging.info(f"Started to load state from {arguments.state}")
+        accelerator.load_state(arguments.state)
 
     model.train()
+    total_steps_passed = 0
+    if accelerator.is_local_main_process:
+        logging.info("Started training")
 
-    steps = 0
+    training_start = time.perf_counter()
+    for epoch in range(1, epochs + 1):
+        epoch_start = time.perf_counter()
 
-    print("Starting training loop")
-    for epoch in range(epochs):
-        model.train()
-        num_batches = 0
-        epoch_sum_loss = 0.0
+        for batch_index, raw in enumerate(train_data_loader, start=1):
+            step_start = time.perf_counter()
 
-        # Accuracy
-        epoch_correctly_predicted_tokens_count = 0
-        epoch_total_tokens_to_predict_count = 0
-
-        start_before_next_batch_iteration = time.perf_counter()
-        for batch in train_data_loader:
             with accelerator.accumulate(model):
-                optimizer.zero_grad()
-                predict = model(batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-
+                batch = make_eagle_input(raw, verifier_model, max_model_len, arguments.noise_low, arguments.noise_high, accelerator.device)
+                predict = model(batch["hidden_states"], input_ids=batch["input_ids"])
                 with torch.no_grad():
-                    target_head = lm_head(batch["target"])
-                    target_p = torch.nn.Softmax(dim=2)(target_head)
-                    target_p = target_p.detach()  # bs, seq_len, vocab_size
-                
+                    target_p = lm_head(batch["target"]).softmax(dim=2).detach()
                 out_head = lm_head(predict)
-                out_logp = torch.nn.LogSoftmax(dim=2)(out_head)  # bs, seq_len, vocab_size
+                out_logp = torch.nn.LogSoftmax(dim=2)(out_head)
 
-                # Accuracy
-                step_accuracy, correctly_predicted_tokens_count, total_tokens_to_predict = _compute_accuracy(
+                _, correctly_predicted_tokens_count, total_tokens_to_predict = _compute_accuracy(
                     target_probabilities=target_p, 
                     predicted_probabilities=out_logp, 
                     loss_mask=batch["loss_mask"]
                 )
-                # If none means loss mask contained 0 only thus we can not compute accuracy and report it
-                if step_accuracy is not None:
-                    epoch_correctly_predicted_tokens_count += correctly_predicted_tokens_count
-                    epoch_total_tokens_to_predict_count += total_tokens_to_predict
 
                 loss_mask = batch["loss_mask"][:, :, None]
                 plogp = target_p * out_logp
@@ -192,125 +161,75 @@ def _train() -> None:
                 vloss = criterion(predict, batch["target"])
                 vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
                 loss = v_w * vloss + p_w * ploss
-
                 accelerator.backward(loss)
                 accelerator.clip_grad_value_(model.parameters(), grad_clip)
-
-                num_batches += 1
-                epoch_sum_loss += loss.item()
-
                 optimizer.step()
-                if torch.cuda.is_available():
-                    torch.cuda.synchronize()
-
-                batch_end_time = time.perf_counter()
-                
-                steps += 1
+                optimizer.zero_grad()
+                total_steps_passed += 1
                 if warmup_steps is not None:
                     scheduler.step()
-                    if accelerator.is_local_main_process:
-                        print('[Train] Epoch {}/{}, Step {}, lr: {:.8f}'.format(epoch + 1, epochs, steps, scheduler.get_last_lr()[0]))
-                        clearml_logger.report_scalar(title="lr", series="series", value=scheduler.get_last_lr()[0], iteration=steps)
-
-                if accelerator.is_local_main_process:
-                    processed_tokens = loss_mask.sum()
-                    time_taken = batch_end_time - start_before_next_batch_iteration
-                    throughput = processed_tokens / time_taken
-                    print('[Train] Epoch {}/{}, Step {}, throughput: {:.2f} tokens/s'.format(epoch + 1, epochs, steps, throughput))
-                    clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=throughput, iteration=steps)
-
-                if step_accuracy is not None:
-                    if accelerator.is_local_main_process:
-                        print('[Train] Epoch {}/{}, Step {}, Step loss: {:.4f}, Step accuracy: {:.4f}'.format(epoch + 1, epochs, steps, loss.item(), step_accuracy))
-                        clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
-                        clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=step_accuracy, iteration=steps)
-                else:
-                    if accelerator.is_local_main_process:
-                        print('[Train] Epoch {}/{}, Step {}, Step loss: {:.4f}'.format(epoch + 1, epochs, steps, loss.item()))
-                        clearml_logger.report_scalar(title="train/steploss", series="series", value=loss.item(), iteration=steps)
-
-                if accelerator.is_local_main_process and steps % save_freq_steps == 0:
-                    _save_sglang_checkpoint(
-                        accelerator=accelerator,
-                        model=model,
-                        eagle_config_path=eagle_config_path,
-                        save_directory=f"{cpdir}/step_{steps}/sglang"
-                    )
-
-                    _save_checkpoint_state(
-                        accelerator=accelerator,
-                        model=model,
-                        save_directory=f"{cpdir}/step_{steps}/state"
-                    )
-                
-                if accelerator.is_local_main_process and steps % evaluate_every_steps == 0:
-                    _eval(
-                        model=model,
-                        lm_head=lm_head,
-                        test_data_loader=test_data_loader,
-                        criterion=criterion,
-                        clearml_logger=clearml_logger,
-                        v_w=v_w,
-                        p_w=p_w,
-                        epoch=epoch,
-                        epochs=epochs,
-                        steps=steps,
-                        accelerator=accelerator
-                    )
-
-                    model.train()
-        
-                start_before_next_batch_iteration = time.perf_counter()
-
-        epoch_mean_loss = epoch_sum_loss / num_batches
-
-        # Accuracy
-        if epoch_total_tokens_to_predict_count == 0:
-            epoch_mean_accuracy = None
-        else:
-            epoch_mean_accuracy = epoch_correctly_predicted_tokens_count / epoch_total_tokens_to_predict_count
-
-        if accelerator.is_local_main_process:
-            # Always report last training metrics
-            clearml_logger.report_scalar(title="train/epochloss", series="series", value=epoch_mean_loss, iteration=epoch + 1)
-            if epoch_mean_accuracy is not None:
-                print('[Train] Epoch {}/{}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, epoch_mean_loss, epoch_mean_accuracy))
-                clearml_logger.report_scalar(title="train/epochaccuracy", series="series", value=epoch_mean_accuracy, iteration=epoch + 1)
-            else:
-                print('[Train] Epoch {}/{}, Epoch loss: {:.4f}'.format(epoch + 1, epochs, epoch_mean_loss))
             
-    
+            # time
+            step_end = time.perf_counter()
+            step_duration = torch.tensor(step_end - step_start, device=accelerator.device)
+            mean_step_duration_across_gpus = accelerator.reduce(step_duration, reduction="mean").item()
+
+            # loss
+            loss_tensor = torch.tensor(loss.item(), device=accelerator.device)
+            mean_loss = accelerator.reduce(loss_tensor, reduction="mean").item()
+
+            # throughput
+            processed_tokens = loss_mask.sum()
+            time_taken = step_end - step_start
+            throughput = processed_tokens / time_taken
+            total_throughput = accelerator.reduce(throughput, reduction="sum").item()
+
+            # accuracy
+            total_number_of_not_nans = accelerator.reduce(torch.tensor(0 if correctly_predicted_tokens_count is None else 1, device=accelerator.device), reduction="sum").item()
+            if total_number_of_not_nans == 0:
+                accuracy == float("nan")
+            else:
+                correctly_predicted_tokens_count = accelerator.reduce(torch.tensor(correctly_predicted_tokens_count or 0, device=accelerator.device), reduction="sum").item()
+                total_tokens_to_predict = accelerator.reduce(torch.tensor(total_tokens_to_predict or 0, device=accelerator.device), reduction="sum").item()
+                accuracy = correctly_predicted_tokens_count / total_tokens_to_predict
+
+            # log all
+            if accelerator.is_local_main_process:
+                logging.info("epoch %d/%d, step %d/%d, dataloader %d/%d, Mean step duration across gpus %.4f seconds, lr %.8f, loss %.4f, throughput %d tps, accuracy %.4f", epoch, epochs, total_steps_passed, steps, batch_index, len(train_data_loader), mean_step_duration_across_gpus, scheduler.get_last_lr()[0], mean_loss, total_throughput, accuracy)
+                clearml_logger.report_scalar(title="lr", series="series", value=scheduler.get_last_lr()[0], iteration=total_steps_passed)
+                clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=total_throughput, iteration=total_steps_passed)
+                clearml_logger.report_scalar(title="train/steploss", series="series", value=mean_loss, iteration=total_steps_passed)
+                clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=accuracy, iteration=total_steps_passed)
+                clearml_logger.report_scalar(title="train/epoch", series="series", value=epoch, iteration=total_steps_passed)
+
+            if accelerator.is_local_main_process and total_steps_passed % save_freq_steps == 0:
+                _save_checkpoint_state(
+                    accelerator=accelerator,
+                    model=model,
+                    save_directory=f"{cpdir}/epoch_{epoch}_step_{total_steps_passed}"
+                )
+
+            if total_steps_passed == steps:
+                break
+
+        if total_steps_passed == steps:
+            break
+        
+        # time
+        epoch_end = time.perf_counter()
+        epoch_duration = torch.tensor(epoch_end - epoch_start, device=accelerator.device)
+        mean_epoch_duration_across_gpus = accelerator.reduce(epoch_duration, reduction="mean").item()
+        if accelerator.is_local_main_process:
+            logging.info("Mean epoch %d duration across GPUs %.4f seconds", epoch, mean_epoch_duration_across_gpus)
+
+    # time
+    training_end = time.perf_counter()
+    training_duration = torch.tensor(training_end - training_start, device=accelerator.device)
+    mean_training_duration_across_gpus = accelerator.reduce(training_duration, reduction="mean").item()
     if accelerator.is_local_main_process:
-        # Always eval in the end of the tarining
-        _eval(
-            model=model,
-            lm_head=lm_head,
-            test_data_loader=test_data_loader,
-            criterion=criterion,
-            clearml_logger=clearml_logger,
-            v_w=v_w,
-            p_w=p_w,
-            epoch=epochs - 1,
-            epochs=epochs,
-            steps=steps,
-            accelerator=accelerator
-        )
-
-        model.train()
-
-        # Always save last checkpoint
-        _save_sglang_checkpoint(
-            accelerator=accelerator,
-            model=model,
-            eagle_config_path=eagle_config_path,
-            save_directory=f"{cpdir}/step_{steps}/sglang"
-        )
-
-        _save_checkpoint_state(
-            accelerator=accelerator,
-            model=model,
-            save_directory=f"{cpdir}/step_{steps}/state"
-        )
+        logging.info("Mean traning duration across GPUs %.4f seconds", mean_training_duration_across_gpus)
+    
+    accelerator.end_training()
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -318,16 +237,28 @@ def _parse_arguments() -> argparse.Namespace:
         description="Process a raw chat dataset using a verifier model and tokenizer."
     )
     parser.add_argument(
-        "--data",
-        type=pathlib.Path,
-        required=True,
-        help="Path to yaml data preset"
-    )
-    parser.add_argument(
         "--model",
         type=pathlib.Path,
         required=True,
         help="Path to verifier model"
+    )
+    parser.add_argument(
+        "--model-dtype",
+        type=str,
+        required=True,
+        help="Path to verifier model"
+    )
+    parser.add_argument(
+        "--eagle-dtype",
+        type=str,
+        required=True,
+        help="Path to verifier model"
+    )
+    parser.add_argument(
+        "--dataset-path",
+        type=pathlib.Path,
+        required=True,
+        help="Path to dataset"
     )
     parser.add_argument(
         "--max-model-len",
@@ -379,12 +310,6 @@ def _parse_arguments() -> argparse.Namespace:
         help="Save model after every number of steps"
     )
     parser.add_argument(
-        "--evaluate",
-        type=int,
-        required=False,
-        help="Evaluate model after every number of steps"
-    )
-    parser.add_argument(
         "--eagle-config",
         type=pathlib.Path,
         help="path to eagle config"
@@ -419,6 +344,47 @@ def _parse_arguments() -> argparse.Namespace:
         default=0.0,
         help="Uniform hiddenstate noise high"
     )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="gradient_accumulation_steps"
+    )
+    parser.add_argument(
+        "--v-w",
+        type=float,
+        default=1.0,
+        help="gradient_accumulation_steps"
+    )
+    parser.add_argument(
+        "--p-w",
+        type=float,
+        default=0.1,
+        help="gradient_accumulation_steps"
+    )
+    parser.add_argument(
+        "--grad-clip",
+        type=float,
+        default=0.5,
+        help="gradient_accumulation_steps"
+    )
+    parser.add_argument(
+        "--optimizer-beta-1",
+        type=float,
+        default=0.9,
+        help="gradient_accumulation_steps"
+    )
+    parser.add_argument(
+        "--optimizer-beta-2",
+        type=float,
+        default=0.95,
+        help="gradient_accumulation_steps"
+    )
+    parser.add_argument(
+        "--mixed-precision",
+        type=str,
+        help="mixed_precision"
+    )
     return parser.parse_args()
 
 
@@ -436,20 +402,6 @@ def _initialize_verifier_lm_head(verifier_path: pathlib.Path) -> torch.nn.Linear
     for param in head.parameters():
         param.requires_grad = False
     return head
-
-
-def _save_sglang_checkpoint(
-    accelerator: accelerate.Accelerator, 
-    model: torch.nn.Module, 
-    eagle_config_path: pathlib.Path, 
-    save_directory: pathlib.Path
-) -> None:
-    accelerator.save_model(model, save_directory=save_directory)
-    with open(eagle_config_path) as rf:
-        cfg = json.load(rf)
-    cfg["architectures"][0] = "LlamaForCausalLMEagle"
-    with open(f"{save_directory}/config.json", "w") as wf:
-        json.dump(cfg, wf, indent=4)
 
 
 def _save_checkpoint_state(
@@ -472,7 +424,6 @@ def _compute_accuracy(
     # we return None
     if total_tokens_to_predict == 0:
         return None, None, None
-
     _, target_max_p_tokens = torch.max(target_probabilities, 2)
     _, ealge_max_p_tokens = torch.max(predicted_probabilities, 2)
     correctly_predicted_tokens_count = ((target_max_p_tokens == ealge_max_p_tokens) * loss_mask.squeeze()).sum().item()
@@ -480,69 +431,61 @@ def _compute_accuracy(
     return step_accuracy, correctly_predicted_tokens_count, total_tokens_to_predict
 
 
-def _eval(
-    model: torch.nn.Module, 
-    lm_head: torch.nn.Module, 
-    test_data_loader: torch.utils.data.DataLoader, 
-    criterion: torch.nn.Module, 
-    clearml_logger,
-    v_w: float,
-    p_w: float,
-    epoch: int,
-    epochs: int,
-    steps: int,
-    accelerator
-) -> None:
-    # Accuracy
-    model.eval()
-    eval_correctly_predicted_tokens_count = 0
-    eval_total_tokens_to_predict_count = 0
-    eval_loss_sum = 0.0
-    eval_num_batches = 0
-    for batch in test_data_loader:
-        with torch.no_grad():
-            predict = model(batch["hidden_states"], input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
-            target_head = lm_head(batch["target"])
-            target_p = torch.nn.Softmax(dim=2)(target_head)
-            target_p = target_p.detach()  # bs, seq_len, vocab_size
-            out_head = lm_head(predict)
-            out_logp = torch.nn.LogSoftmax(dim=2)(out_head)  # bs, seq_len, vocab_size
-            # Accuracy
-            _, correctly_predicted_tokens_count, total_tokens_to_predict = _compute_accuracy(
-                target_probabilities=target_p, 
-                predicted_probabilities=out_logp, 
-                loss_mask=batch["loss_mask"]
-            )
-            if correctly_predicted_tokens_count is not None:
-                eval_correctly_predicted_tokens_count += correctly_predicted_tokens_count
-                eval_total_tokens_to_predict_count += total_tokens_to_predict
-
-            loss_mask = batch["loss_mask"][:, :, None]
-            plogp = target_p * out_logp
-            ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
-            vloss = criterion(predict, batch["target"])
-            vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
-            loss = v_w * vloss + p_w * ploss
-            eval_loss_sum += loss.item()
-            eval_num_batches += 1
-
-    val_mean_loss = eval_loss_sum / eval_num_batches
-    if eval_total_tokens_to_predict_count != 0:
-        val_mean_accuracy = eval_correctly_predicted_tokens_count / eval_total_tokens_to_predict_count
-    else:
-        val_mean_accuracy = None
-    if accelerator.is_local_main_process:
-        clearml_logger.report_scalar(title="validation/epochloss", series="series", value=val_mean_loss, iteration=epoch + 1)
-        clearml_logger.report_scalar(title="validation/steploss", series="series", value=val_mean_loss, iteration=steps)
-        if val_mean_accuracy is not None:
-            print('[Validation] Epoch {}/{}, Step {}, Epoch loss: {:.4f}, Epoch accuracy: {:.4f}'.format(epoch + 1, epochs, steps, val_mean_loss, val_mean_accuracy))
-            clearml_logger.report_scalar(title="validation/epochaccuracy", series="series", value=val_mean_accuracy, iteration=epoch + 1)
-        else:
-            print('[Validation] Epoch {}/{}, Step {}, Epoch loss: {:.4f}'.format(epoch + 1, epochs, steps, val_mean_loss))
-
-
 def _count_parameters(model: torch.nn.Module) -> int:
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
+def make_eagle_input(batch, verifier_model, max_model_len, transform_uniform_low, transformer_uniform_high, device):
+    input_ids = batch["input_ids"].to(device, non_blocking=True)[:, :max_model_len]
+    loss_mask = batch["loss_mask"].to(device, non_blocking=True)[:, :max_model_len]
+
+    with torch.no_grad():
+        outs_big = verifier_model(input_ids, output_hidden_states=True)
+        hidden_state_big = outs_big.hidden_states[-1]
+        noise = torch.empty_like(hidden_state_big).uniform_(transform_uniform_low, transformer_uniform_high)
+        hidden_state_big.add_(noise)
+        T, L, D = hidden_state_big.shape
+        target = hidden_state_big.new_zeros((T, L, D)) 
+        target[:, :-1, :] = hidden_state_big[:, 1:, :]
+        batch = {
+            "input_ids": input_ids,
+            "hidden_states": hidden_state_big,
+            "target": target,
+            "loss_mask": loss_mask
+        }
+        return batch
+
+
+class Dataset(torch.utils.data.Dataset):
+    def __init__(self, dataset: datasets.Dataset) -> None:
+        self._dataset = dataset
+    
+    def __len__(self) -> int:
+        return len(self._dataset)
+    
+    def __getitem__(self, index: int) -> dict:
+        return self._dataset[index]
+
+
+class BaseCollator:
+    def __init__(self, model_path) -> None:
+        self._tokenizer = transformers.AutoTokenizer.from_pretrained(str(model_path), use_fast=True)
+        self._tokenizer.pad_token = "[PAD]"
+
+    def __call__(self, features: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
+        result = self._tokenizer.apply_chat_template(
+            [m["messages"] for m in features], 
+            tokenize=True, 
+            add_generation_prompt=False, 
+            return_dict=True,
+            return_assistant_tokens_mask=True,
+            return_tensors="pt",
+            padding=True
+        )
+        return {
+            "input_ids": result["input_ids"],
+            "loss_mask": result["assistant_masks"]
+        }
 
 
 if __name__ == "__main__":
