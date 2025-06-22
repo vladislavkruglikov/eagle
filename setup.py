@@ -15,7 +15,7 @@ setuptools.setup(
         "torch==2.7.1",
         "transformers==4.52.4",
         "clearml==2.0.0",
-        "wheel==0.45.1",
+        "packaging==25.0",
         "flash-attn==2.8.0.post2",
     ],
     classifiers=[
