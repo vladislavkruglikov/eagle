@@ -1,5 +1,6 @@
 import os
 import time
+import math
 import json
 import torch
 import typing
@@ -9,6 +10,7 @@ import clearml
 import argparse
 import datasets
 import accelerate
+import contextlib
 import safetensors
 import transformers
 
@@ -22,7 +24,7 @@ logging.basicConfig(
 )
 
 
-def _train() -> None:
+def train() -> None:
     arguments = _parse_arguments()
     model_path: pathlib.Path = arguments.model
     dataset_path = arguments.dataset_path
@@ -50,13 +52,15 @@ def _train() -> None:
 
     if accelerator.is_local_main_process:
         logging.info("Started to load target langauge model head")
-    lm_head = _initialize_verifier_lm_head(verifier_path=model_path).to(getattr(torch, arguments.model_dtype))
+    lm_head = _initialize_verifier_lm_head(verifier_path=model_path).to(getattr(torch, arguments.lmhead_dtype))
     if accelerator.is_local_main_process:
         logging.info("Target langauge model head has dtype %s", next(lm_head.parameters()).dtype)
 
     if accelerator.is_local_main_process:
         logging.info("Started to load langauge model")
-    verifier_model = transformers.AutoModelForCausalLM.from_pretrained(model_path, device_map=accelerator.device, attn_implementation="flash_attention_2", torch_dtype=arguments.model_dtype)
+    # verifier_model = transformers.AutoModelForCausalLM.from_pretrained(model_path, device_map=accelerator.device, attn_implementation="flash_attention_2", torch_dtype=arguments.model_dtype)
+    verifier_model = transformers.AutoModelForCausalLM.from_pretrained(model_path, device_map=accelerator.device, torch_dtype=arguments.model_dtype)
+
     verifier_model = verifier_model.eval()
     if accelerator.is_local_main_process:
         logging.info("Target langauge model has dtype %s", next(verifier_model.parameters()).dtype)
@@ -70,7 +74,7 @@ def _train() -> None:
 
     if accelerator.is_local_main_process:
         logging.info("Started to create dataloaders")
-    train_data_loader = torch.utils.data.DataLoader(prefetch_factor=4, pin_memory=True, dataset=train_dataset, batch_size=arguments.micro_bs, num_workers=16, collate_fn=BaseCollator(model_path))
+    train_data_loader = torch.utils.data.DataLoader(shuffle=False, prefetch_factor=4, pin_memory=True, dataset=train_dataset, batch_size=arguments.micro_bs, num_workers=16, collate_fn=BaseCollator(model_path))
 
     if accelerator.is_local_main_process:
         logging.info("Started to load eagle model")
@@ -134,74 +138,125 @@ def _train() -> None:
     if accelerator.is_local_main_process:
         logging.info("Started training")
 
+    # training start
     training_start = time.perf_counter()
+
+    # reference for ddp with accelerate
+    # https://huggingface.co/docs/accelerate/en/usage_guides/gradient_accumulation#self-contained-causal-lm-example
+    
     for epoch in range(1, epochs + 1):
+        # epoch start
         epoch_start = time.perf_counter()
 
-        for batch_index, raw in enumerate(train_data_loader, start=1):
+        training_iterator = iter(train_data_loader)
+        num_samples_in_epoch = len(train_data_loader)
+        remainder = num_samples_in_epoch % gradient_accumulation_steps
+        remainder = remainder if remainder != 0 else gradient_accumulation_steps
+        total_updates = math.ceil(num_samples_in_epoch / gradient_accumulation_steps)
+        for update_step in range(total_updates):
+            # step start
             step_start = time.perf_counter()
 
-            with accelerator.accumulate(model):
-                batch = make_eagle_input(raw, verifier_model, max_model_len, arguments.noise_low, arguments.noise_high, accelerator.device)
-                predict = model(batch["hidden_states"], input_ids=batch["input_ids"])
-                with torch.no_grad():
-                    target_p = lm_head(batch["target"]).softmax(dim=2).detach()
-                out_head = lm_head(predict)
-                out_logp = torch.nn.LogSoftmax(dim=2)(out_head)
+            # prepare train data for epoch
+            batch_samples = []
+            num_batches_in_step = gradient_accumulation_steps if update_step != (total_updates - 1) else remainder
+            for _ in range(num_batches_in_step):
+                batch_samples += [next(training_iterator)]                
+            num_items_in_batch = sum([batch["loss_mask"].sum() for batch in batch_samples])
+            num_items_in_batch = accelerator.gather(num_items_in_batch).sum().item()
+            L = 0
 
-                _, correctly_predicted_tokens_count, total_tokens_to_predict = _compute_accuracy(
-                    target_probabilities=target_p, 
-                    predicted_probabilities=out_logp, 
-                    loss_mask=batch["loss_mask"]
-                )
+            # statistics to compute step accuracy later
+            step_correctly_predicted_tokens_count = 0
+            step_total_tokens_to_predict = 0
 
-                loss_mask = batch["loss_mask"][:, :, None]
-                plogp = target_p * out_logp
-                ploss = -torch.sum(torch.sum(loss_mask * plogp, 2)) / (loss_mask.sum()+1e-5)
-                vloss = criterion(predict, batch["target"])
-                vloss = torch.sum(torch.mean(loss_mask * vloss, 2)) / (loss_mask.sum()+1e-5)
-                loss = v_w * vloss + p_w * ploss
-                accelerator.backward(loss)
-                accelerator.clip_grad_value_(model.parameters(), grad_clip)
-                optimizer.step()
-                optimizer.zero_grad()
-                total_steps_passed += 1
-                if warmup_steps is not None:
-                    scheduler.step()
+            for i, batch in enumerate(batch_samples):
+                # batch start
+
+                if (i < len(batch_samples) - 1 and accelerator.num_processes > 1):
+                    ctx = model.no_sync
+                else:
+                    ctx = contextlib.nullcontext
+                with ctx():
+                    # online generate hidden states using big verifier model
+                    batch = make_eagle_input(batch, verifier_model, max_model_len, arguments.noise_low, arguments.noise_high, accelerator.device)
+                    batch["hidden_states"] = batch["hidden_states"].to(getattr(torch, arguments.eagle_dtype))
+                    batch["target"] = batch["target"].to(getattr(torch, arguments.eagle_dtype))
+                    # eagle forward pass
+                    predict = model(batch["hidden_states"], input_ids=batch["input_ids"])
+                    with torch.no_grad():
+                        target_head = lm_head(batch["target"])
+                        target_p = torch.nn.Softmax(dim=2)(target_head)
+                        target_p = target_p.detach()
+                    out_head = lm_head(predict)
+                    out_logp = torch.nn.LogSoftmax(dim=2)(out_head)
+                    
+                    # accumulate statistics to compute step accuracy later
+                    _, correctly_predicted_tokens_count, total_tokens_to_predict = _compute_accuracy(
+                        target_probabilities=target_p, 
+                        predicted_probabilities=out_logp, 
+                        loss_mask=batch["loss_mask"]
+                    )
+
+                    step_correctly_predicted_tokens_count += correctly_predicted_tokens_count or 0
+                    step_total_tokens_to_predict += total_tokens_to_predict or 0
+
+                    loss_mask = batch["loss_mask"][:, :, None]
+                    plogp = target_p * out_logp
+                    ploss = -torch.sum(torch.sum(loss_mask * plogp, 2))
+                    vloss = criterion(predict, batch["target"])
+                    vloss = torch.sum(torch.mean(loss_mask * vloss, 2))
+                    loss = v_w * vloss + p_w * ploss
+                    loss = (loss * gradient_accumulation_steps * accelerator.num_processes) / num_items_in_batch
+                    accelerator.backward(loss)
+                    accelerator.clip_grad_value_(model.parameters(), grad_clip)
+                    L += loss.item()
+
+            total_steps_passed += 1
+            optimizer.step()
+            optimizer.zero_grad()
+            if warmup_steps is not None:
+                scheduler.step()
             
-            # time
+            # record time
             step_end = time.perf_counter()
             step_duration = torch.tensor(step_end - step_start, device=accelerator.device)
             mean_step_duration_across_gpus = accelerator.reduce(step_duration, reduction="mean").item()
-
-            # loss
-            loss_tensor = torch.tensor(loss.item(), device=accelerator.device)
+            
+            # step loss
+            L /= len(batch_samples)
+            loss_tensor = torch.tensor(L, device=accelerator.device)
             mean_loss = accelerator.reduce(loss_tensor, reduction="mean").item()
-
-            # throughput
-            processed_tokens = loss_mask.sum()
+            
+            # step throughput
             time_taken = step_end - step_start
-            throughput = processed_tokens / time_taken
+            throughput = torch.tensor(num_items_in_batch / time_taken, device=accelerator.device)
             total_throughput = accelerator.reduce(throughput, reduction="sum").item()
-
-            # accuracy
-            total_number_of_not_nans = accelerator.reduce(torch.tensor(0 if correctly_predicted_tokens_count is None else 1, device=accelerator.device), reduction="sum").item()
+            
+            # step accuracy
+            accuracy = float("nan")
+            total_number_of_not_nans = accelerator.reduce(torch.tensor(0 if step_correctly_predicted_tokens_count is None else 1, device=accelerator.device), reduction="sum").item()
             if total_number_of_not_nans == 0:
-                accuracy == float("nan")
+                accuracy = float("nan")
             else:
-                correctly_predicted_tokens_count = accelerator.reduce(torch.tensor(correctly_predicted_tokens_count or 0, device=accelerator.device), reduction="sum").item()
-                total_tokens_to_predict = accelerator.reduce(torch.tensor(total_tokens_to_predict or 0, device=accelerator.device), reduction="sum").item()
-                accuracy = correctly_predicted_tokens_count / total_tokens_to_predict
-
-            # log all
+                step_correctly_predicted_tokens_count = accelerator.reduce(torch.tensor(step_correctly_predicted_tokens_count or 0, device=accelerator.device), reduction="sum").item()
+                step_total_tokens_to_predict = accelerator.reduce(torch.tensor(step_total_tokens_to_predict or 0, device=accelerator.device), reduction="sum").item()
+                accuracy = step_correctly_predicted_tokens_count / step_total_tokens_to_predict
+            
+            # log all to log and clearml
             if accelerator.is_local_main_process:
-                logging.info("epoch %d/%d, step %d/%d, dataloader %d/%d, Mean step duration across gpus %.4f seconds, lr %.8f, loss %.4f, throughput %d tps, accuracy %.4f", epoch, epochs, total_steps_passed, steps, batch_index, len(train_data_loader), mean_step_duration_across_gpus, scheduler.get_last_lr()[0], mean_loss, total_throughput, accuracy)
-                clearml_logger.report_scalar(title="lr", series="series", value=scheduler.get_last_lr()[0], iteration=total_steps_passed)
+                a = float("nan")
+                if warmup_steps is not None:
+                    a = scheduler.get_last_lr()[0]
+                logging.info("epoch %d/%d, step %d/%d, Mean step duration across gpus %.4f seconds, lr %.8f, loss %.4f, throughput %d tps, accuracy %.4f", epoch, epochs, total_steps_passed, steps, mean_step_duration_across_gpus, a, mean_loss, total_throughput, accuracy)
+                if warmup_steps is not None:
+                    clearml_logger.report_scalar(title="lr", series="series", value=scheduler.get_last_lr()[0], iteration=total_steps_passed)
                 clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=total_throughput, iteration=total_steps_passed)
                 clearml_logger.report_scalar(title="train/steploss", series="series", value=mean_loss, iteration=total_steps_passed)
                 clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=accuracy, iteration=total_steps_passed)
                 clearml_logger.report_scalar(title="train/epoch", series="series", value=epoch, iteration=total_steps_passed)
-
+            
+            # save checkpoint
             if accelerator.is_local_main_process and total_steps_passed % save_freq_steps == 0:
                 _save_checkpoint_state(
                     accelerator=accelerator,
@@ -209,20 +264,22 @@ def _train() -> None:
                     save_directory=f"{cpdir}/epoch_{epoch}_step_{total_steps_passed}"
                 )
 
+            # stop training if reached steps
             if total_steps_passed == steps:
                 break
-
+        
+        # stop training if reached steps
         if total_steps_passed == steps:
             break
-        
-        # time
+    
+        # epoch training time report
         epoch_end = time.perf_counter()
         epoch_duration = torch.tensor(epoch_end - epoch_start, device=accelerator.device)
         mean_epoch_duration_across_gpus = accelerator.reduce(epoch_duration, reduction="mean").item()
         if accelerator.is_local_main_process:
             logging.info("Mean epoch %d duration across GPUs %.4f seconds", epoch, mean_epoch_duration_across_gpus)
 
-    # time
+    # total training time report
     training_end = time.perf_counter()
     training_duration = torch.tensor(training_end - training_start, device=accelerator.device)
     mean_training_duration_across_gpus = accelerator.reduce(training_duration, reduction="mean").item()
@@ -255,6 +312,12 @@ def _parse_arguments() -> argparse.Namespace:
         help="Path to verifier model"
     )
     parser.add_argument(
+        "--lmhead-dtype",
+        type=str,
+        required=True,
+        help="Path to verifier model"
+    )
+    parser.add_argument(
         "--dataset-path",
         type=pathlib.Path,
         required=True,
@@ -282,7 +345,6 @@ def _parse_arguments() -> argparse.Namespace:
         "--warmup-steps",
         type=int,
         required=False,
-        default=1_000,
         help="Number of warmup steps to train"
     )
     parser.add_argument(
@@ -383,6 +445,7 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "--mixed-precision",
         type=str,
+        required=False,
         help="mixed_precision"
     )
     return parser.parse_args()
@@ -489,4 +552,4 @@ class BaseCollator:
 
 
 if __name__ == "__main__":
-    _train()
+    train()
