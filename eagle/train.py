@@ -147,8 +147,7 @@ def coach() -> None:
             accuracy = float("nan")
             if num_items_in_batch != 0:
                 step_correctly_predicted_tokens_count = accelerator.reduce(torch.tensor(step_correctly_predicted_tokens_count, device=accelerator.device), reduction="sum").item()
-                step_total_tokens_to_predict = accelerator.reduce(torch.tensor(num_items_in_batch, device=accelerator.device), reduction="sum").item()
-                accuracy = step_correctly_predicted_tokens_count / step_total_tokens_to_predict
+                accuracy = step_correctly_predicted_tokens_count / num_items_in_batch
 
             current_lr = arguments.learning_rate
             if arguments.num_warmup_steps is not None:
