@@ -401,7 +401,7 @@ class LlamaDecoderLayer(nn.Module):
         return outputs
 
 
-class Model(nn.Module):
+class Llama2Model(nn.Module):
     def __init__(self,config,load_emb=False,path=None,bias=True):
         super().__init__()
         self.gradient_checkpointing = True

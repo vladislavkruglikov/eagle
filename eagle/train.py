@@ -13,7 +13,8 @@ import contextlib
 import safetensors
 import transformers
 
-from eagle.model import Model
+from eagle.llama2 import Llama2Model
+from eagle.qwen2 import Qwen2Model
 
 
 def coach() -> None:
@@ -48,7 +49,13 @@ def coach() -> None:
 
     logger.info("Start to prepare draft model ", main_process_only=True)
     config = transformers.AutoConfig.from_pretrained(arguments.eagle_config_path)
-    model = Model(config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to(accelerator.device)
+    if arguments.architecture == "llama2":
+        eagle_model_cls = Llama2Model
+    elif arguments.architecture == "qwen2":
+        eagle_model_cls = Qwen2Model
+    else:
+        raise ValueError(f"Unknow architecture {arguments.architecture}")
+    model = eagle_model_cls(config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to(accelerator.device)
     logger.info("Draft model head has dtype %s", next(model.parameters()).dtype, main_process_only=True)
     logger.info("Draft model head has %f billion parameters", _count_parameters(model=model) / 10 ** 9, main_process_only=True)
     model.train()
@@ -176,6 +183,7 @@ def coach() -> None:
 
 def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Coach that trains eagle draft model")
+    parser.add_argument("--architecture", type=str, required=True, choices=["llama2", "qwen2"], help="Model architecture; must be one of: llama2, qwen2")
     parser.add_argument("--micro-batch-size", type=int, required=True, help="Micro batch size")
     parser.add_argument("--gradient-accumulation-steps", type=int, required=True, help="Gradient accumulation steps")
     parser.add_argument("--num-warmup-steps", type=int, required=True, help="Num warmup steps")
@@ -240,6 +248,7 @@ class Collator:
     def __init__(self, model_path) -> None:
         self._tokenizer = transformers.AutoTokenizer.from_pretrained(str(model_path), use_fast=True)
         self._tokenizer.pad_token = "[PAD]"
+        self._tokenizer.pad_token_id = 0
 
     def __call__(self, features: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
         result = self._tokenizer.apply_chat_template([m["messages"] for m in features], tokenize=True, add_generation_prompt=False, return_dict=True, return_assistant_tokens_mask=True, return_tensors="pt", padding=True)
