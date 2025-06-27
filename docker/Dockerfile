@@ -14,7 +14,6 @@ RUN pip install --upgrade pip
 
 RUN pip install torch==2.7.1 transformers==4.52.4 datasets==3.6.0 accelerate==1.8.1 clearml==2.0.0
 RUN pip install psutil
-RUN pip uninstall -y ninja && pip install ninja
-RUN MAX_JOBS=4 pip install flash-attn==2.8.0.post2 --no-build-isolation
 
-COPY ./eagle ./eagle
+# COPY ./eagle ./eagle
+COPY ./eagle3 ./eagle
