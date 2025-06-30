@@ -29,8 +29,8 @@ import os
 
 from transformers.activations import ACT2FN
 from transformers import AutoTokenizer
-from modeling_llama_kv import LlamaForCausalLM
-from configs import EConfig
+from eagle3.modelling_llama_kv import LlamaForCausalLM
+from eagle3.configs import EConfig
 from safetensors import safe_open
 from datasets import load_dataset
 import multiprocessing
@@ -519,11 +519,14 @@ class Model(nn.Module):
         N = self.draft_vocab_size
         if not os.path.exists("cache.pt"):
             tokenizer = AutoTokenizer.from_pretrained(tokenizerpath)
-            dataset = load_dataset('json', data_files=datapath)
-            dataset = dataset['train']
+            if tokenizer.pad_token is None:
+                tokenizer.pad_token = tokenizer.eos_token
+            dataset = load_dataset("liyucheng/ShareGPT90K") # hardcode
+
+            dataset = dataset['train'].select(range(100))
             # dataset = dataset.select(range(96))
             original_columns1 = dataset.column_names
-            num_proc = 48
+            num_proc = 1 # 48
 
 
             def preprocess_function(examples):
@@ -532,21 +535,28 @@ class Model(nn.Module):
                     "input_ids": [],
                     "loss_mask": []
                 }
+                # print(examples)
+                
                 for i in range(len(examples['id'])):
                     messages = [
                         {"role": "system",
-                         "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
+                        "content": "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."},
                     ]
                     convroles = ["user", "assistant"]
                     roles = {"human": "user", "gpt": "assistant"}
                     source = examples['conversations'][i]
                     if not source:
                         continue
-                    if roles[source[0]["from"]] != "user":
+                    if roles[source["from"][0]] != "user":
                         # Skip the first one if it is not from human
-                        source = source[1:]
-                    for j, sentence in enumerate(source):
+                        print("something bad happened")
+                        source['from'] = source['from'][1:]
+                        source['value'] = source['value'][1:]
+                    source_messages = [{"from": f, "value": v} for f, v in zip(source["from"], source["value"])]
+
+                    for j, sentence in enumerate(source_messages):
                         role = roles[sentence["from"]]
+                        
                         assert role == convroles[j % 2], f"{i}"
                         # if sentence["from"]=="gpt":
                         #     sentence["value"]=" "+sentence["value"]

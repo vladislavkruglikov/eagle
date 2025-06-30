@@ -15,6 +15,7 @@ import transformers
 
 # from eagle.model import Model
 from eagle3.model import Model
+from eagle3.configs import EConfig
 
 
 def coach() -> None:
@@ -42,7 +43,12 @@ def coach() -> None:
 
     logger.info("Start to prepare draft model ", main_process_only=True)
     config = transformers.AutoConfig.from_pretrained(arguments.eagle_config_path)
-    model = Model(config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to(accelerator.device)
+    config.rope_scaling = {
+        'type': 'linear',
+        'factor': config.rope_scaling['factor']
+    }
+    eagle_config = EConfig(**config.to_dict())
+    model = Model(eagle_config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to(accelerator.device)
     model.scandata(datapath=arguments.dataset_path, tokenizerpath=arguments.verifier_model_path)  # ожидается, что будет лежать cache.pt, иначе будет сам обсчитывать используя load_dataset('json', datapath)
     logger.info("Draft model head has dtype %s", next(model.parameters()).dtype, main_process_only=True)
     logger.info("Draft model head has %f billion parameters", _count_parameters(model=model) / 10 ** 9, main_process_only=True)
@@ -218,13 +224,14 @@ class Dataset(torch.utils.data.Dataset):
 class Collator:
     def __init__(self, model_path) -> None:
         self._tokenizer = transformers.AutoTokenizer.from_pretrained(str(model_path), use_fast=True)
-        self._tokenizer.pad_token = "[PAD]"
+        if self._tokenizer.pad_token is None or self._tokenizer.pad_token_id is None:
+            self._tokenizer.pad_token = self._tokenizer.eos_token
 
     def __call__(self, features: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-        result = self._tokenizer.apply_chat_template([m["messages"] for m in features], tokenize=True, add_generation_prompt=False, return_dict=True, return_assistant_tokens_mask=True, return_tensors="pt", padding=True)
+        result = self._tokenizer.apply_chat_template([m["messages"] for m in features], tokenize=True, add_generation_prompt=False, return_dict=True, return_assistant_tokens_mask=False, return_tensors="pt", padding=True)
         return {
             "input_ids": result["input_ids"],
-            "loss_mask": result["assistant_masks"]
+            "loss_mask": torch.ones_like(result["input_ids"])# result["assistant_masks"]
         }
 
 
