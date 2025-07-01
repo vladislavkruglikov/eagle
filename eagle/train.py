@@ -72,6 +72,9 @@ def coach() -> None:
     accelerator.register_for_checkpointing(scheduler)
 
     model = accelerator.prepare_model(model)
+    accelerator.skip_checkpointing(model.target_model)
+    if arguments.load_embeddings:
+        accelerator.skip_checkpointing(model.embed_tokens)
     model_optimizer = accelerator.prepare_optimizer(model_optimizer)
     dataloader = accelerator.prepare_data_loader(dataloader, device_placement=True)
     scheduler = accelerator.prepare_scheduler(scheduler)
@@ -149,10 +152,6 @@ def coach() -> None:
                     clearml_logger.report_scalar(title=f"train/stepaccuracy for step {i}", series="series", value=acc, iteration=total_steps_passed)
 
             if accelerator.is_local_main_process and total_steps_passed % arguments.save == 0:
-                accelerator.skip_checkpointing(model.target_model)
-                if arguments.load_embeddings:
-                    accelerator.skip_checkpointing(model.embed_tokens)
-    
                 accelerator.save_state(output_dir=f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}")
             
 
