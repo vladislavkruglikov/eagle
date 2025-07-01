@@ -16,6 +16,7 @@ import transformers
 # from eagle.model import Model
 from eagle3.model import Model
 from eagle3.configs import EConfig
+import torch.nn.functional as F
 
 
 def coach() -> None:
@@ -48,8 +49,8 @@ def coach() -> None:
         'factor': config.rope_scaling['factor']
     }
     eagle_config = EConfig(**config.to_dict())
-    model = Model(eagle_config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to(accelerator.device)
-    model.scandata(datapath=arguments.dataset_path, tokenizerpath=arguments.verifier_model_path)  # ожидается, что будет лежать cache.pt, иначе будет сам обсчитывать используя load_dataset('json', datapath)
+    model = Model(eagle_config, load_emb=arguments.load_embeddings, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to(accelerator.device)
+    model.scandata(datapath=arguments.dataset_path, tokenizerpath=arguments.verifier_model_path, cachepath=arguments.cachepath)
     logger.info("Draft model head has dtype %s", next(model.parameters()).dtype, main_process_only=True)
     logger.info("Draft model head has %f billion parameters", _count_parameters(model=model) / 10 ** 9, main_process_only=True)
     model.train()
@@ -99,9 +100,9 @@ def coach() -> None:
                 else:
                     ctx = contextlib.nullcontext
                 with ctx():
-                    batch = _make_eagle_input(batch, verifier_model, arguments.maximum_model_length, arguments.noise_low, arguments.noise_high, accelerator.device)
-                    batch["hidden_states"] = batch["hidden_states"]
-                    batch["target"] = batch["target"]
+                    # batch = _make_eagle_input(batch, verifier_model, arguments.maximum_model_length, arguments.noise_low, arguments.noise_high, accelerator.device)
+                    # batch["hidden_states"] = batch["hidden_states"]
+                    # batch["target"] = batch["target"]
                     plosses, _, acces = model( 
                         input_ids=batch["input_ids"],
                         attention_mask=None,  # они сами потом её замутят
@@ -138,15 +139,20 @@ def coach() -> None:
             if arguments.num_warmup_steps is not None:
                 current_lr = scheduler.get_last_lr()[0]
             
-            logger.info("epoch %d/%d, step %d/%d, mean step duration across gpus %.4f seconds, lr %.8f, loss %.4f, throughput %d tps, accuracy %.4f", epoch + 1, arguments.epochs, total_steps_passed, arguments.num_training_steps, mean_step_duration_across_gpus, current_lr, loss_tensor, total_throughput, accuracy, main_process_only=True)
+            logger.info("epoch %d/%d, step %d/%d, mean step duration across gpus %.4f seconds, lr %.8f, loss %.4f, throughput %d tps, accuracy[-1] %.4f", epoch + 1, arguments.epochs, total_steps_passed, arguments.num_training_steps, mean_step_duration_across_gpus, current_lr, loss_tensor, total_throughput, acces[-1], main_process_only=True)
             if accelerator.is_main_process:
                 clearml_logger.report_scalar(title="train/steploss", series="series", value=loss_tensor, iteration=total_steps_passed)
                 clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=total_throughput, iteration=total_steps_passed)
-                clearml_logger.report_scalar(title="train/stepaccuracy0", series="series", value=acces[0], iteration=total_steps_passed)
                 clearml_logger.report_scalar(title="train/epoch", series="series", value=epoch, iteration=total_steps_passed)
                 clearml_logger.report_scalar(title="train/lr", series="series", value=current_lr, iteration=total_steps_passed)
+                for i, acc in enumerate(acces):
+                    clearml_logger.report_scalar(title=f"train/stepaccuracy for step {i}", series="series", value=acc, iteration=total_steps_passed)
 
             if accelerator.is_local_main_process and total_steps_passed % arguments.save == 0:
+                accelerator.skip_checkpointing(model.target_model)
+                if arguments.load_embeddings:
+                    accelerator.skip_checkpointing(model.embed_tokens)
+    
                 accelerator.save_state(output_dir=f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}")
             
 
@@ -187,6 +193,8 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--verifier-model-dtype", type=str, required=False, help="Save model after every number of steps")
     parser.add_argument("--eagle-dtype", type=str, required=False, help="Save model after every number of steps")
     parser.add_argument("--attn", type=str, required=False, help="Save model after every number of steps")
+    parser.add_argument("--cachepath", type=pathlib.Path, required=False, help="cache of freq used tokens")
+    parser.add_argument("--load-embeddings", type=bool, required=False, default=True, help="load embeddings or not")
     return parser.parse_args()
 
 
@@ -227,11 +235,120 @@ class Collator:
         if self._tokenizer.pad_token is None or self._tokenizer.pad_token_id is None:
             self._tokenizer.pad_token = self._tokenizer.eos_token
 
-    def __call__(self, features: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:
-        result = self._tokenizer.apply_chat_template([m["messages"] for m in features], tokenize=True, add_generation_prompt=False, return_dict=True, return_assistant_tokens_mask=False, return_tensors="pt", padding=True)
+    def __call__(self, features: list[dict]) -> dict[str, torch.Tensor]:
+        batch = {
+            "id": [f["id"] for f in features],
+            "conversations": [f["conversations"] for f in features],
+        }
+
+        preprocessed = self.preprocess_function(batch)
+        # preprocessed = self.preprocess_function(features)
+
+        input_ids = torch.cat(preprocessed["input_ids"], dim=0)
+        loss_mask = torch.cat(preprocessed["loss_mask"], dim=0)
+
         return {
-            "input_ids": result["input_ids"],
-            "loss_mask": torch.ones_like(result["input_ids"])# result["assistant_masks"]
+            "input_ids": input_ids,
+            "loss_mask": loss_mask,
+        }
+
+    def preprocess_function(self, examples):
+        tokenizer = self._tokenizer
+        default_system_prompt = "You are a helpful, respectful and honest assistant. Always answer as helpfully as possible, while being safe.  Your answers should not include any harmful, unethical, racist, sexist, toxic, dangerous, or illegal content. Please ensure that your responses are socially unbiased and positive in nature.\n\nIf a question does not make any sense, or is not factually coherent, explain why instead of answering something not correct. If you don't know the answer to a question, please don't share false information."
+
+        new_examples = {
+            "input_ids": [],
+            "loss_mask": []
+        }
+
+        for i in range(len(examples['id'])):
+            messages = []
+            convroles = ["user", "assistant"]
+            roles = {"human": "user", "gpt": "assistant", "system": "system"}
+            source = examples['conversations'][i]
+            
+            if not source:
+                continue
+            if roles[source[0]["from"]] != "user":
+                if roles[source[0]["from"]] == "system":
+                    system_promt = source[0]["value"]
+                elif roles[source[0]["from"]] == "assistant":
+                    system_promt = default_system_prompt
+                
+                messages.append({"role": "system", "content": system_promt})
+                source = source[1:]
+
+            for j, sentence in enumerate(source):
+                role = roles[sentence["from"]]
+                assert role == convroles[j % 2], f"{i}"
+                messages.append({"role": role, "content": sentence["value"]})
+
+            conversation = tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+            )
+
+            if not tokenizer.pad_token_id:
+                tokenizer.pad_token_id = tokenizer.unk_token_id
+
+            input_ids = tokenizer(
+                conversation,
+                return_tensors="pt",
+                max_length=2048,
+                add_special_tokens=False,
+            ).input_ids[0]
+            loss_mask = torch.ones_like(input_ids)
+
+            sep = "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+            total_len = len(input_ids)
+            sep2 = "<|eot_id|><|start_header_id|>user<|end_header_id|>"
+            turns = conversation.split(sep2)
+
+            turns[1] = turns[0] + sep2 + turns[1]
+            turns = turns[1:]
+
+            cur_len = 1
+            loss_mask[:cur_len] = 0
+            for i, turn in enumerate(turns):
+                if turn == "":
+                    break
+                turn_len = len(tokenizer(turn).input_ids)
+
+                parts = turn.split(sep)
+                if len(parts) != 2:
+                    break
+                parts[0] += sep
+                instruction_len = len(tokenizer(parts[0]).input_ids) - 1
+
+                if i == 0:
+                    loss_mask[cur_len: cur_len + instruction_len - 2] = 0
+                else:
+                    loss_mask[cur_len - 3: cur_len + instruction_len + 1] = 0
+                cur_len += turn_len
+                if i != 0:
+                    cur_len += 3
+
+            loss_mask[cur_len:] = 0
+
+            new_examples["input_ids"].append(input_ids[None, :])
+            new_examples["loss_mask"].append(loss_mask[None, :])
+        
+        max_len = max(x.shape[1] for x in new_examples["input_ids"])  # ?
+
+        padded_input_ids = [
+            F.pad(x, (0, max_len - x.shape[1]), value=self._tokenizer.pad_token_id)
+            for x in new_examples["input_ids"]
+        ]
+
+        padded_loss_mask = [
+            F.pad(x, (0, max_len - x.shape[1]), value=0)
+            for x in new_examples["loss_mask"]
+        ]
+
+        return {
+            "input_ids": padded_input_ids,
+            "loss_mask": padded_loss_mask
         }
 
 
