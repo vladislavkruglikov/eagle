@@ -212,7 +212,7 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--verifier-model-dtype", type=str, required=False, help="Save model after every number of steps")
     parser.add_argument("--eagle-dtype", type=str, required=False, help="Save model after every number of steps")
     parser.add_argument("--attn", type=str, required=False, help="Save model after every number of steps")
-    parser.add_argument("--stage", type=str, required=False, help="bmw m stage, 0 pure ddp, 1 adds verifier model tp across world size")
+    parser.add_argument("--stage", type=int, required=False, help="bmw m stage, 0 pure ddp, 1 adds verifier model tp across world size")
     return parser.parse_args()
 
 
