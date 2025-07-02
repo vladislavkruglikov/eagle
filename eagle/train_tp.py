@@ -8,8 +8,6 @@ import clearml
 import logging
 import datasets
 import argparse
-import accelerate
-import contextlib
 import safetensors
 import transformers
 
@@ -20,33 +18,27 @@ from eagle.llama2 import Llama2Model
 def coach() -> None:
     arguments = _parse_arguments()
 
-    accelerator = accelerate.Accelerator(log_with="all", gradient_accumulation_steps=arguments.gradient_accumulation_steps, mixed_precision=arguments.mixed_precision)
-    accelerate.utils.set_seed(seed=0)
     torch.backends.cuda.matmul.allow_tf32 = True
     logging.basicConfig(level=logging.INFO, format='%(levelname)s %(asctime)s [%(filename)s:%(lineno)d] %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
-    logger = accelerate.logging.get_logger(name=__name__, log_level="INFO")
 
-    if accelerator.is_main_process:
-        logger.info("Start to prepare clearml ", main_process_only=True)
-        clearml_task = clearml.Task.init(project_name=arguments.clearml_project, task_name=arguments.clearml_task, reuse_last_task_id=False, continue_last_task=False, output_uri=False, auto_connect_frameworks=False, auto_resource_monitoring=False)
-        clearml_logger = clearml_task.get_logger()
+    logging.info("Start to prepare clearml ")
+    clearml_task = clearml.Task.init(project_name=arguments.clearml_project, task_name=arguments.clearml_task, reuse_last_task_id=False, continue_last_task=False, output_uri=False, auto_connect_frameworks=False, auto_resource_monitoring=False)
+    clearml_logger = clearml_task.get_logger()
     
-    logger.info("Start to prepare language model head ", main_process_only=True)
-    lm_head = _initialize_verifier_lm_head(verifier_path=arguments.verifier_model_path).to(getattr(torch, arguments.verifier_model_lm_head_dtype)).to(accelerator.device)
-    logger.info("Language model head has dtype %s", next(lm_head.parameters()).dtype, main_process_only=True)
-    logger.info("Language model head has %f billion parameters", _count_parameters(model=lm_head) / 10 ** 9, main_process_only=True)
-    if accelerator.is_main_process:
-        clearml_logger.report_single_value(name="Language model head parameters billion", value=_count_parameters(model=lm_head) / 10 ** 9)
+    logging.info("Start to prepare language model head ")
+    lm_head = _initialize_verifier_lm_head(verifier_path=arguments.verifier_model_path).to(getattr(torch, arguments.verifier_model_lm_head_dtype)).to("cuda")
+    logging.info("Language model head has dtype %s", next(lm_head.parameters()).dtype)
+    logging.info("Language model head has %f billion parameters", _count_parameters(model=lm_head) / 10 ** 9)
+    clearml_logger.report_single_value(name="Language model head parameters billion", value=_count_parameters(model=lm_head) / 10 ** 9)
 
-    logger.info("Start to prepare target model ", main_process_only=True)
-    verifier_model = transformers.AutoModelForCausalLM.from_pretrained(arguments.verifier_model_path, device_map=accelerator.device, torch_dtype=getattr(torch, arguments.verifier_model_dtype), attn_implementation=arguments.attn)
+    logging.info("Start to prepare target model ")
+    verifier_model = transformers.AutoModelForCausalLM.from_pretrained(arguments.verifier_model_path, device_map="auto", torch_dtype=getattr(torch, arguments.verifier_model_dtype), attn_implementation=arguments.attn)
     verifier_model = verifier_model.eval()
-    logger.info("Target model head has dtype %s", next(verifier_model.parameters()).dtype, main_process_only=True)
-    logger.info("Target model head has %f billion parameters", _count_parameters(model=verifier_model) / 10 ** 9, main_process_only=True)
-    if accelerator.is_main_process:
-        clearml_logger.report_single_value(name="Target model head parameters billion", value=_count_parameters(model=verifier_model) / 10 ** 9)
+    logging.info("Target model head has dtype %s", next(verifier_model.parameters()).dtype)
+    logging.info("Target model head has %f billion parameters", _count_parameters(model=verifier_model) / 10 ** 9)
+    clearml_logger.report_single_value(name="Target model head parameters billion", value=_count_parameters(model=verifier_model) / 10 ** 9)
 
-    logger.info("Start to prepare draft model ", main_process_only=True)
+    logging.info("Start to prepare draft model ")
     config = transformers.AutoConfig.from_pretrained(arguments.eagle_config_path)
     if arguments.architecture == "llama2":
         eagle_model_cls = Llama2Model
@@ -54,34 +46,25 @@ def coach() -> None:
         eagle_model_cls = Qwen2Model
     else:
         raise ValueError(f"Unknow architecture {arguments.architecture}")
-    model = eagle_model_cls(config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to(accelerator.device)
-    logger.info("Draft model head has dtype %s", next(model.parameters()).dtype, main_process_only=True)
-    logger.info("Draft model head has %f billion parameters", _count_parameters(model=model) / 10 ** 9, main_process_only=True)
+    model = eagle_model_cls(config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to("cuda")
+    logging.info("Draft model head has dtype %s", next(model.parameters()).dtype)
+    logging.info("Draft model head has %f billion parameters", _count_parameters(model=model) / 10 ** 9)
     model.train()
-    accelerator.register_for_checkpointing(model)
-    if accelerator.is_main_process:
-        clearml_logger.report_single_value(name="Draft model head parameters billion", value=_count_parameters(model=model) / 10 ** 9)
+    clearml_logger.report_single_value(name="Draft model head parameters billion", value=_count_parameters(model=model) / 10 ** 9)
 
-    logger.info("Start to prepare data ", main_process_only=True)
+    logging.info("Start to prepare data ")
     dataset = datasets.load_dataset("json", data_files={"train": [arguments.dataset_path]})["train"]
     dataset = Dataset(dataset=dataset)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=arguments.micro_batch_size, collate_fn=Collator(arguments.verifier_model_path))
-    logger.info("Dataset contains %d samples", len(dataset), main_process_only=True)
+    logging.info("Dataset contains %d samples", len(dataset))
 
-    logger.info("Start to prepare miscellaneous ", main_process_only=True)
+    logging.info("Start to prepare miscellaneous ")
     criterion = torch.nn.SmoothL1Loss(reduction="none")
     model_optimizer = torch.optim.AdamW(model.parameters(), lr=arguments.learning_rate, betas=(arguments.b1, arguments.b2))
-    accelerator.register_for_checkpointing(model_optimizer)
 
     scheduler = transformers.get_linear_schedule_with_warmup(optimizer=model_optimizer, num_warmup_steps=arguments.num_warmup_steps, num_training_steps=arguments.num_training_steps)
-    accelerator.register_for_checkpointing(scheduler)
 
-    model = accelerator.prepare_model(model)
-    model_optimizer = accelerator.prepare_optimizer(model_optimizer)
-    dataloader = accelerator.prepare_data_loader(dataloader, device_placement=True)
-    scheduler = accelerator.prepare_scheduler(scheduler)
-
-    logger.info("Start training ", main_process_only=True)
+    logging.info("Start training ")
     total_steps_passed = 0
     for epoch in range(arguments.epochs):
         training_iterator = iter(dataloader)
@@ -97,41 +80,35 @@ def coach() -> None:
             for _ in range(num_batches_in_step):
                 batch_samples += [next(training_iterator)]   
             num_items_in_batch = sum([batch["loss_mask"][:, :arguments.maximum_model_length].sum() for batch in batch_samples])
-            num_items_in_batch = accelerator.gather(num_items_in_batch).sum().item()
             step_correctly_predicted_tokens_count = 0
 
             for i, batch in enumerate(batch_samples):
-                if (i < len(batch_samples) - 1 and accelerator.num_processes > 1):
-                    ctx = model.no_sync
-                else:
-                    ctx = contextlib.nullcontext
-                with ctx():
-                    batch = _make_eagle_input(batch, verifier_model, arguments.maximum_model_length, arguments.noise_low, arguments.noise_high, accelerator.device)
-                    batch["hidden_states"] = batch["hidden_states"]
-                    batch["target"] = batch["target"]
-                    predict = model(batch["hidden_states"].to( getattr(torch, arguments.eagle_dtype) ), input_ids=batch["input_ids"])
-                    with torch.no_grad():
-                        target_head = lm_head(batch["target"].to( getattr(torch, arguments.verifier_model_lm_head_dtype) ),)
-                        target_p = torch.nn.Softmax(dim=2)(target_head)
-                        target_p = target_p.detach()
-                    out_head = lm_head(predict.to(getattr(torch, arguments.verifier_model_lm_head_dtype)))
-                    out_logp = torch.nn.LogSoftmax(dim=2)(out_head)
+                batch = _make_eagle_input(batch, verifier_model, arguments.maximum_model_length, arguments.noise_low, arguments.noise_high, "cuda")
+                batch["hidden_states"] = batch["hidden_states"]
+                batch["target"] = batch["target"]
+                predict = model(batch["hidden_states"].to( getattr(torch, arguments.eagle_dtype) ), input_ids=batch["input_ids"])
+                with torch.no_grad():
+                    target_head = lm_head(batch["target"].to( getattr(torch, arguments.verifier_model_lm_head_dtype) ),)
+                    target_p = torch.nn.Softmax(dim=2)(target_head)
+                    target_p = target_p.detach()
+                out_head = lm_head(predict.to(getattr(torch, arguments.verifier_model_lm_head_dtype)))
+                out_logp = torch.nn.LogSoftmax(dim=2)(out_head)
 
-                    loss_mask = batch["loss_mask"][:, :, None]
-                    
-                    _, target_max_p_tokens = torch.max(target_p, 2)
-                    _, ealge_max_p_tokens = torch.max(out_logp, 2)
-                    step_correctly_predicted_tokens_count += ((target_max_p_tokens == ealge_max_p_tokens) * loss_mask.squeeze()).sum().item()
+                loss_mask = batch["loss_mask"][:, :, None]
+                
+                _, target_max_p_tokens = torch.max(target_p, 2)
+                _, ealge_max_p_tokens = torch.max(out_logp, 2)
+                step_correctly_predicted_tokens_count += ((target_max_p_tokens == ealge_max_p_tokens) * loss_mask.squeeze()).sum().item()
 
-                    plogp = target_p * out_logp
-                    ploss = -torch.sum(torch.sum(loss_mask * plogp, 2))
-                    vloss = criterion(predict, batch["target"])
-                    vloss = torch.sum(torch.mean(loss_mask * vloss, 2))
-                    loss = arguments.v_w * vloss + arguments.p_w * ploss
-                    loss = (loss * arguments.gradient_accumulation_steps * accelerator.num_processes) / num_items_in_batch
-                    accum_loss += loss.item()
-                    accelerator.backward(loss)
-                    accelerator.clip_grad_value_(model.parameters(), arguments.grad_clip)
+                plogp = target_p * out_logp
+                ploss = -torch.sum(torch.sum(loss_mask * plogp, 2))
+                vloss = criterion(predict, batch["target"])
+                vloss = torch.sum(torch.mean(loss_mask * vloss, 2))
+                loss = arguments.v_w * vloss + arguments.p_w * ploss
+                loss = loss / num_items_in_batch
+                accum_loss += loss.item()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), arguments.grad_clip)
             
             model_optimizer.step()
             scheduler.step()
@@ -140,44 +117,36 @@ def coach() -> None:
             total_steps_passed += 1
 
             step_end = time.perf_counter()
-            step_duration = torch.tensor(step_end - step_start, device=accelerator.device)
-            mean_step_duration_across_gpus = accelerator.reduce(step_duration, reduction="mean").item()
+            mean_step_duration_across_gpus = step_end - step_start
 
             time_taken = step_end - step_start
-            throughput = torch.tensor(num_items_in_batch / time_taken, device=accelerator.device)
-            total_throughput = accelerator.reduce(throughput, reduction="sum").item()
+            total_throughput = num_items_in_batch / time_taken
 
-            loss_tensor = torch.tensor(accum_loss / (arguments.gradient_accumulation_steps * accelerator.num_processes), device=accelerator.device)
-            loss_tensor = accelerator.reduce(loss_tensor, reduction="sum").item()
+            loss_tensor = accum_loss
 
             accuracy = float("nan")
             if num_items_in_batch != 0:
-                step_correctly_predicted_tokens_count = accelerator.reduce(torch.tensor(step_correctly_predicted_tokens_count, device=accelerator.device), reduction="sum").item()
                 accuracy = step_correctly_predicted_tokens_count / num_items_in_batch
 
             current_lr = arguments.learning_rate
             if arguments.num_warmup_steps is not None:
                 current_lr = scheduler.get_last_lr()[0]
             
-            logger.info("epoch %d/%d, step %d/%d, mean step duration across gpus %.4f seconds, lr %.8f, loss %.4f, throughput %d tps, accuracy %.4f", epoch + 1, arguments.epochs, total_steps_passed, arguments.num_training_steps, mean_step_duration_across_gpus, current_lr, loss_tensor, total_throughput, accuracy, main_process_only=True)
-            if accelerator.is_main_process:
-                clearml_logger.report_scalar(title="train/steploss", series="series", value=loss_tensor, iteration=total_steps_passed)
-                clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=total_throughput, iteration=total_steps_passed)
-                clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=accuracy, iteration=total_steps_passed)
-                clearml_logger.report_scalar(title="train/epoch", series="series", value=epoch, iteration=total_steps_passed)
-                clearml_logger.report_scalar(title="train/lr", series="series", value=current_lr, iteration=total_steps_passed)
+            logging.info("epoch %d/%d, step %d/%d, mean step duration across gpus %.4f seconds, lr %.8f, loss %.4f, throughput %d tps, accuracy %.4f", epoch + 1, arguments.epochs, total_steps_passed, arguments.num_training_steps, mean_step_duration_across_gpus, current_lr, loss_tensor, total_throughput, accuracy)
+            clearml_logger.report_scalar(title="train/steploss", series="series", value=loss_tensor, iteration=total_steps_passed)
+            clearml_logger.report_scalar(title="train/throughput tokens/s", series="series", value=total_throughput, iteration=total_steps_passed)
+            clearml_logger.report_scalar(title="train/stepaccuracy", series="series", value=accuracy, iteration=total_steps_passed)
+            clearml_logger.report_scalar(title="train/epoch", series="series", value=epoch, iteration=total_steps_passed)
+            clearml_logger.report_scalar(title="train/lr", series="series", value=current_lr, iteration=total_steps_passed)
 
-            if accelerator.is_local_main_process and total_steps_passed % arguments.save == 0:
-                accelerator.save_state(output_dir=f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}")
-            
+            if total_steps_passed % arguments.save == 0:
+                torch.save(model.state_dict(), f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}/model_state_dict.pth")
 
             if total_steps_passed == arguments.num_training_steps:
                 break
 
         if total_steps_passed == arguments.num_training_steps:
             break
-
-    accelerator.end_training()
 
 
 def _parse_arguments() -> argparse.Namespace:
