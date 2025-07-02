@@ -83,7 +83,7 @@ def coach() -> None:
     model_optimizer = accelerator.prepare_optimizer(model_optimizer)
     dataloader = accelerator.prepare_data_loader(dataloader, device_placement=True)
     scheduler = accelerator.prepare_scheduler(scheduler)
-    
+
     logger.info("Start training ", main_process_only=True)
     total_steps_passed = 0
     for epoch in range(arguments.epochs):
