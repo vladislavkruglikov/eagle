@@ -13,8 +13,8 @@ import contextlib
 import safetensors
 import transformers
 
-from eagle.llama2 import Llama2Model
 from eagle.qwen2 import Qwen2Model
+from eagle.llama2 import Llama2Model
 
 
 def coach() -> None:
@@ -39,9 +39,11 @@ def coach() -> None:
         clearml_logger.report_single_value(name="Language model head parameters billion", value=_count_parameters(model=lm_head) / 10 ** 9)
 
     logger.info("Start to prepare target model ", main_process_only=True)
-    verifier_model = transformers.AutoModelForCausalLM.from_pretrained(arguments.verifier_model_path, device_map=accelerator.device, torch_dtype=getattr(torch, arguments.verifier_model_dtype), attn_implementation=arguments.attn)
+    verifier_model_device_map = accelerator.device
+    if arguments.stage == 1:
+        verifier_model_device_map = "auto"
+    verifier_model = transformers.AutoModelForCausalLM.from_pretrained(arguments.verifier_model_path, device_map=verifier_model_device_map, torch_dtype=getattr(torch, arguments.verifier_model_dtype), attn_implementation=arguments.attn)
     verifier_model = verifier_model.eval()
-    verifier_model = verifier_model.to(accelerator.device)
     logger.info("Target model head has dtype %s", next(verifier_model.parameters()).dtype, main_process_only=True)
     logger.info("Target model head has %f billion parameters", _count_parameters(model=verifier_model) / 10 ** 9, main_process_only=True)
     if accelerator.is_main_process:
@@ -210,6 +212,7 @@ def _parse_arguments() -> argparse.Namespace:
     parser.add_argument("--verifier-model-dtype", type=str, required=False, help="Save model after every number of steps")
     parser.add_argument("--eagle-dtype", type=str, required=False, help="Save model after every number of steps")
     parser.add_argument("--attn", type=str, required=False, help="Save model after every number of steps")
+    parser.add_argument("--stage", type=int, required=False, help="bmw m stage, 0 pure ddp, 1 adds verifier model tp across world size")
     return parser.parse_args()
 
 
@@ -259,10 +262,21 @@ class Collator:
 
 
 def _make_eagle_input(batch, verifier_model, max_model_len, transform_uniform_low, transformer_uniform_high, device):
-    input_ids = batch["input_ids"].to(device, non_blocking=True)[:, :max_model_len]
-    loss_mask = batch["loss_mask"].to(device, non_blocking=True)[:, :max_model_len]
+    input_ids = batch["input_ids"].to(device)
+    loss_mask = batch["loss_mask"].to(device)
+
+    B, L = input_ids.shape
+
+    if L < max_model_len:
+        pad_len = max_model_len - L
+        input_ids   = torch.nn.functional.pad(input_ids, (0, pad_len), value=0)
+        loss_mask   = torch.nn.functional.pad(loss_mask, (0, pad_len), value=0)
+    else:
+        input_ids = input_ids[:, :max_model_len]
+        loss_mask = loss_mask[:, :max_model_len]
+
     with torch.no_grad():
-        outs_big = verifier_model(input_ids, output_hidden_states=True)
+        outs_big = verifier_model(input_ids, output_hidden_states=True, use_cache=False)
         hidden_state_big = outs_big.hidden_states[-1]
         hidden_state_big = _apply_noise_to_hidden_state(hidden_state_big, transform_uniform_low, transformer_uniform_high)
         T, L, D = hidden_state_big.shape
