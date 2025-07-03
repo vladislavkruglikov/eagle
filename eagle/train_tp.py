@@ -140,6 +140,7 @@ def coach() -> None:
             clearml_logger.report_scalar(title="train/lr", series="series", value=current_lr, iteration=total_steps_passed)
 
             if total_steps_passed % arguments.save == 0:
+                pathlib.Path(f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}").mkdir(parents=True)
                 torch.save(model.state_dict(), f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}/model_state_dict.pth")
 
             if total_steps_passed == arguments.num_training_steps:
