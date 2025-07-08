@@ -11,7 +11,6 @@ import argparse
 import safetensors
 import transformers
 
-from eagle.qwen2 import Qwen2Model
 from eagle.llama2 import Llama2Model
 
 
@@ -40,13 +39,7 @@ def coach() -> None:
 
     logging.info("Start to prepare draft model ")
     config = transformers.AutoConfig.from_pretrained(arguments.eagle_config_path)
-    if arguments.architecture == "llama2":
-        eagle_model_cls = Llama2Model
-    elif arguments.architecture == "qwen2":
-        eagle_model_cls = Qwen2Model
-    else:
-        raise ValueError(f"Unknow architecture {arguments.architecture}")
-    model = eagle_model_cls(config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to("cuda")
+    model = Llama2Model(config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to("cuda")
     logging.info("Draft model head has dtype %s", next(model.parameters()).dtype)
     logging.info("Draft model head has %f billion parameters", _count_parameters(model=model) / 10 ** 9)
     model.train()
@@ -141,7 +134,12 @@ def coach() -> None:
 
             if total_steps_passed % arguments.save == 0:
                 pathlib.Path(f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}").mkdir(parents=True)
-                torch.save(model.state_dict(), f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}/model_state_dict.pth")
+                safetensors.torch.save_file(model.state_dict(), f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}/model.safetensors")
+                with open(arguments.eagle_config_path, "r") as f:
+                    config_data = json.load(f)
+                config_data["architectures"] = ["LlamaForCausalLMEagle"]
+                with open(f"{arguments.cpdir}/epoch_{epoch}_step_{total_steps_passed}/config.json", "w") as file:
+                    json.dump(config_data, file, ensure_ascii=False, indent=4)        
 
             if total_steps_passed == arguments.num_training_steps:
                 break
@@ -152,7 +150,6 @@ def coach() -> None:
 
 def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Coach that trains eagle draft model")
-    parser.add_argument("--architecture", type=str, required=True, choices=["llama2", "qwen2"], help="Model architecture; must be one of: llama2, qwen2")
     parser.add_argument("--micro-batch-size", type=int, required=True, help="Micro batch size")
     parser.add_argument("--gradient-accumulation-steps", type=int, required=True, help="Gradient accumulation steps")
     parser.add_argument("--num-warmup-steps", type=int, required=True, help="Num warmup steps")

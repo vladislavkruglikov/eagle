@@ -7,7 +7,7 @@ Page will cover all steps neede to reproduce eagle 1 paper for model [meta-llama
 In order to use tool you need to build docker
 
 ```bash
-docker build --tag eagle -f docker/Dockerfile .
+docker build --tag vladislavkruglikov/eagle:0.3.1 -f docker/Dockerfile .
 ```
 
 Or use already build one
