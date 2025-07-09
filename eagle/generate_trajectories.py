@@ -1,6 +1,6 @@
+import time
 import torch
 import sglang
-import asyncio
 import pathlib
 import argparse
 import datasets
@@ -37,7 +37,7 @@ def _prepare_dataset() -> None:
     dataset = dataset.map(
         lambda example: _tokenize_dataset(example=example, tokenizer=tokenizer),
         batched=False,
-        num_proc=16,
+        num_proc=1,
         desc="Tokenizing dataset"
     )
 
@@ -46,6 +46,7 @@ def _prepare_dataset() -> None:
         tp_size=arguments.tp,
         pp_size=arguments.pp,
         dp_size=arguments.dp,
+        log_level="info"
     )
 
     sampling_params = {
@@ -53,15 +54,30 @@ def _prepare_dataset() -> None:
         "max_new_tokens": arguments.max_new_tokens
     }
 
+    batched_input_ids = [el["input_ids"] for el in dataset]
+
+    start = time.perf_counter()
+    outputs: list[dict] = llm.generate(input_ids=batched_input_ids, sampling_params=sampling_params)
+    end = time.perf_counter()
+    print(end - start, "total inference")
+
+
+    def add_reply(example, idx):
+        msgs = example["messages"].copy()
+        msgs.append({"role": "assistant", "content": outputs[idx]["text"]})
+        return {"messages": msgs}
+
+
     dataset = dataset.map(
-        lambda example: sync_wrapper(example, llm, sampling_params),
+        add_reply,
+        with_indices=True,
         batched=False,
-        num_proc=16,
-        desc="Running sglang inference ⚙️"
+        desc="Appending assistant replies"
     )
-    
+
+
     print("Saving to disk")
-    dataset.select_columns(["messages"]).to_json(output_path)
+    dataset.select_columns(["id", "messages"]).to_json(output_path, force_ascii=False)
 
 
 def _parse_arguments() -> argparse.Namespace:
@@ -148,21 +164,6 @@ def _tokenize_dataset(example: dict, tokenizer: transformers.AutoTokenizer) -> d
         "input_ids": result["input_ids"],
         "messages": messages
     }
-
-
-async def get_assistant_reply(input_ids, llm, sampling_params):
-    return (await llm.async_generate(input_ids=input_ids, sampling_params=sampling_params))["text"]
-
-
-async def async_process(example, llm, sampling_params):
-    processed_text = await get_assistant_reply(example["input_ids"], llm, sampling_params)
-    messages = example["messages"]
-    messages.append({"role": "assistant", "content": processed_text})
-    return {"messages": messages}
-
-
-def sync_wrapper(example, llm, sampling_params):
-    return asyncio.get_event_loop().run_until_complete(async_process(example, llm, sampling_params))
 
 
 if __name__ == "__main__":
