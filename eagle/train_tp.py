@@ -73,6 +73,11 @@ def coach() -> None:
             for _ in range(num_batches_in_step):
                 batch_samples += [next(training_iterator)]   
             num_items_in_batch = sum([batch["loss_mask"][:, :arguments.maximum_model_length].sum() for batch in batch_samples])
+
+            if num_items_in_batch == 0:
+                logging.warning("num_items_in_batch is zero, skipping steps")
+                continue
+
             step_correctly_predicted_tokens_count = 0
 
             for i, batch in enumerate(batch_samples):
