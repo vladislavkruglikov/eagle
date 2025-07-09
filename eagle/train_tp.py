@@ -48,7 +48,12 @@ def coach() -> None:
     logging.info("Start to prepare data ")
     dataset = datasets.load_dataset("json", data_files={"train": [arguments.dataset_path]})["train"]
     dataset = Dataset(dataset=dataset)
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=arguments.micro_batch_size, collate_fn=Collator(arguments.verifier_model_path))
+    dataloader = torch.utils.data.DataLoader(
+        dataset, 
+        batch_size=arguments.micro_batch_size, 
+        collate_fn=Collator(arguments.verifier_model_path), 
+        shuffle=True
+    )
     logging.info("Dataset contains %d samples", len(dataset))
 
     logging.info("Start to prepare miscellaneous ")
