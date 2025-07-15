@@ -40,8 +40,8 @@ def coach() -> None:
     logging.info("Start to prepare draft model ")
     config = transformers.AutoConfig.from_pretrained(arguments.eagle_config_path)
     model = Llama2Model(config, load_emb=True, path=arguments.verifier_model_path).to(getattr(torch, arguments.eagle_dtype)).to("cuda")
-    logging.info("Draft model head has dtype %s", next(model.parameters()).dtype)
-    logging.info("Draft model head has %f billion parameters", _count_parameters(model=model) / 10 ** 9)
+    logging.info("Draft model has dtype %s", next(model.parameters()).dtype)
+    logging.info("Draft model has %f billion parameters", _count_parameters(model=model) / 10 ** 9)
     model.train()
     clearml_logger.report_single_value(name="Draft model head parameters billion", value=_count_parameters(model=model) / 10 ** 9)
 
@@ -50,6 +50,18 @@ def coach() -> None:
     dataset = Dataset(dataset=dataset)
     dataloader = torch.utils.data.DataLoader(dataset, batch_size=arguments.micro_batch_size, collate_fn=Collator(arguments.verifier_model_path))
     logging.info("Dataset contains %d samples", len(dataset))
+
+    logging.info("Loading token mapping cache...")
+    cache = torch.load(arguments.token_mapping_cache)
+    d2t = cache["d2t"]
+    t2d = cache["t2d"]
+    draft_vocab_size = sum(t2d)
+    logging.info("Vocab size of draft model is %d", draft_vocab_size)
+    d2t = d2t.to("cuda")
+    t2d = t2d.to("cuda")
+
+    logging.info("Vocab size of draft model is %d", draft_vocab_size)
+
 
     logging.info("Start to prepare miscellaneous ")
     criterion = torch.nn.SmoothL1Loss(reduction="none")
@@ -85,21 +97,32 @@ def coach() -> None:
                 batch["hidden_states"] = batch["hidden_states"]
                 batch["target"] = batch["target"]
                 predict = model(batch["hidden_states"].to( getattr(torch, arguments.eagle_dtype) ), input_ids=batch["input_ids"])
-                with torch.no_grad():
-                    target_head = lm_head(batch["target"].to( getattr(torch, arguments.verifier_model_lm_head_dtype) ),)
-                    target_p = torch.nn.Softmax(dim=2)(target_head)
-                    target_p = target_p.detach()
-                out_head = lm_head(predict.to(getattr(torch, arguments.verifier_model_lm_head_dtype)))
-                out_logp = torch.nn.LogSoftmax(dim=2)(out_head)
 
                 loss_mask = batch["loss_mask"][:, :, None]
+
+                with torch.no_grad():
+                    target_head = lm_head(batch["target"].to( getattr(torch, arguments.verifier_model_lm_head_dtype) ),)
+
+                    target_max_token = target_head.argmax(-1)
+                    target_mask = t2d[target_max_token]
+                    target_mask = target_mask[..., None].int()
+                    position_mask = target_mask * loss_mask
+                    target_head = target_head[..., t2d]
+                    target_head = target_head.float()
+
+                    target_p = torch.nn.Softmax(dim=2)(target_head)
+                    target_p = target_p.detach()
+
+                out_head = torch.nn.functional.linear(predict.to(getattr(torch, arguments.verifier_model_lm_head_dtype)), lm_head.weight[t2d, :], lm_head.bias)
+                out_logp = torch.nn.LogSoftmax(dim=2)(out_head)
+
                 
                 _, target_max_p_tokens = torch.max(target_p, 2)
                 _, ealge_max_p_tokens = torch.max(out_logp, 2)
                 step_correctly_predicted_tokens_count += ((target_max_p_tokens == ealge_max_p_tokens) * loss_mask.squeeze()).sum().item()
 
                 plogp = target_p * out_logp
-                ploss = -torch.sum(torch.sum(loss_mask * plogp, 2))
+                ploss = -torch.sum(torch.sum(position_mask * plogp, 2))
                 vloss = criterion(predict, batch["target"])
                 vloss = torch.sum(torch.mean(loss_mask * vloss, 2))
                 loss = arguments.v_w * vloss + arguments.p_w * ploss
@@ -155,6 +178,7 @@ def coach() -> None:
 
 def _parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Coach that trains eagle draft model")
+    parser.add_argument("--token-mapping-cache", type=pathlib.Path, required=True, help="Path to token mapping cache (d2t and t2d)")
     parser.add_argument("--micro-batch-size", type=int, required=True, help="Micro batch size")
     parser.add_argument("--gradient-accumulation-steps", type=int, required=True, help="Gradient accumulation steps")
     parser.add_argument("--num-warmup-steps", type=int, required=True, help="Num warmup steps")
@@ -202,7 +226,6 @@ def _initialize_verifier_lm_head(verifier_path: pathlib.Path) -> torch.nn.Linear
     for param in head.parameters():
         param.requires_grad = False
     return head
-
 
 class Dataset(torch.utils.data.Dataset):
     def __init__(self, dataset: datasets.Dataset) -> None:
